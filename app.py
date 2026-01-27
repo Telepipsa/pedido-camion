@@ -715,8 +715,8 @@ if st.button("Calcular ventas"):
 						'diff_sales': diff_sales
 					}
 					st.session_state['last_results'] = saved
-					# render usando la función que muestra el checkbox encima de la tabla
-					render_saved_results(st.session_state.get('last_results'))
+					# resultados guardados en session_state; la visualización persistente
+					# se renderiza una sola vez más abajo para evitar duplicados de widgets
 
 					# (Estas vistas se muestran vía session_state para permitir toggles sin recálculo)
 
