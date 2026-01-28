@@ -6,3 +6,9 @@ __pycache__/
 .idea/
 *.db
 .DS_Store
+
+# Ignored by user request
+/inventario_actual.xls
+/inventario_actual/
+/ficheros_a_convertir/
+/consumo_teorico/
