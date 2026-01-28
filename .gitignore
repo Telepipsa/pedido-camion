@@ -9,7 +9,18 @@ __pycache__/
 
 # Ignored by user request
 /inventario_actual.xls
-/inventario_actual/
-/ficheros_a_convertir/
-/consumo_teorico/
-/ficheros_a_convertir_bulk/
+# keep folder but ignore its contents; allow .gitkeep
+/inventario_actual/*
+!/inventario_actual/.gitkeep
+
+# keep folder but ignore its contents; allow .gitkeep
+/ficheros_a_convertir/*
+!/ficheros_a_convertir/.gitkeep
+
+# keep folder but ignore its contents; allow .gitkeep
+/ficheros_a_convertir_bulk/*
+!/ficheros_a_convertir_bulk/.gitkeep
+
+# keep folder but ignore its contents; allow .gitkeep
+/consumo_teorico/*
+!/consumo_teorico/.gitkeep
