@@ -29,6 +29,10 @@ def render_saved_results(res):
 
 	st.markdown('### Cantidad a pedir')
 	st.write(f"Ficheros usados: {', '.join(res.get('chosen_files', []))}")
+	# mostrar ficheros jueves usados (si los hay), incluyendo duplicados
+	thurs_used = res.get('chosen_thurs', [])
+	if thurs_used:
+		st.write(f"Ficheros jueves usados: {', '.join(thurs_used)}")
 	st.info('''**Ajustes aplicados**
 
 	- Colchon 20%
@@ -383,6 +387,16 @@ if st.button("Calcular ventas"):
 			# seleccionar candidatos activos según toggle (evitar jueves cuando sea posible)
 			thursday_files = [c[0].name for c in candidates if c[3]]
 			non_thurs = [c for c in candidates if not c[3]]
+			from datetime import timedelta as _td
+			# calcular lista de jueves en el rango solicitado
+			curd = start_sel
+			thursdays = []
+			while curd <= end_sel:
+				if curd.weekday() == 3:
+					thursdays.append(curd)
+				curd = curd + _td(days=1)
+			required_thurs = len(thursdays)
+
 			if avoid_thurs:
 				# mostrar solo una línea con los ficheros a evitar (si existen) y usar alternativas sin jueves
 				if thursday_files and non_thurs:
@@ -395,63 +409,167 @@ if st.button("Calcular ventas"):
 					# no hay ficheros con jueves, usar todos
 					active_candidates = candidates
 			else:
-				# modo desactivado -> usar todos los ficheros (no mostrar mensaje)
-				active_candidates = candidates
+				# modo desactivado -> debemos asegurar que la selección final contenga
+				# el mismo número de jueves que el rango. Construimos una lista de
+				# items donde los ficheros de día único con jueves pueden duplicarse
+				# (para permitir usar el mismo jueves varias veces). Los ficheros bulk
+				# (rangos) no se duplican.
+				item_entries = []
+				for c in candidates:
+					f, d_or_r, v, has_th = c
+					# contar jueves dentro del propio fichero (no limitado al rango seleccionado)
+					if isinstance(d_or_r, tuple):
+						s, e = d_or_r
+						cur = s
+						th_count = 0
+						while cur <= e:
+							if cur.weekday() == 3:
+								th_count += 1
+							cur = cur + _td(days=1)
+						item_entries.append((f, d_or_r, v, th_count, True))
+					else:
+						d = d_or_r
+						th_count = 1 if d.weekday() == 3 else 0
+						# añadir entrada única
+						item_entries.append((f, d_or_r, v, th_count, False))
+					# tras construir item_entries, comprobar si la suma total de jueves
+					# entre todos los items ya alcanza required_thurs; si no, duplicar
+					# ficheros de jueves de un solo día prefiriendo archivos distintos.
+					current_th_total = sum(it[3] for it in item_entries)
+					if current_th_total < required_thurs:
+						need = required_thurs - current_th_total
+						# listar índices de ficheros de jueves de un solo día (no bulk)
+						single_th_idxs = [i for i, it in enumerate(item_entries) if (not it[4]) and it[3] == 1]
+						if single_th_idxs:
+							# añadir duplicados prefiriendo distintos archivos (round-robin)
+							idx_cycle = 0
+							while need > 0:
+								src_idx = single_th_idxs[idx_cycle % len(single_th_idxs)]
+								item_entries.append(item_entries[src_idx])
+								need -= 1
+								idx_cycle += 1
+						# si no hay single_th_idxs no hacemos nada (no hay ficheros jueves de un día)
+					active_candidates = item_entries
 
+			# construir arrays de valores y contador de jueves por item
 			vals = [int(round(c[2] * 100)) for c in active_candidates]
+			th_counts = [c[3] for c in active_candidates]
 
-			# subset sum search (meet-in-the-middle for performance)
-			def subset_sums(items):
-				n = len(items)
+			# subset sum search (meet-in-the-middle) que además preserva el conteo de jueves
+			def subset_sums_with_th(items_vals, items_th):
+				n = len(items_vals)
 				res = []
 				for mask in range(1 << n):
 					s = 0
 					idxs = []
+					th = 0
 					for i in range(n):
 						if mask >> i & 1:
-							s += items[i]
+							s += items_vals[i]
 							idxs.append(i)
-					res.append((s, idxs))
+							th += items_th[i]
+					res.append((s, idxs, th))
 				return res
 
 			n = len(vals)
 			best_idxs = []
+			# función auxiliar para elegir el mejor subconjunto priorizando primero
+			# la cercanía en número de jueves respecto a required_thurs y luego
+			# la diferencia absoluta respecto al objetivo de ventas
+			def pick_best(subsets):
+				# calcular la distancia mínima en número de jueves
+				min_th_diff = min(abs(required_thurs - s[2]) for s in subsets)
+				candidates = [s for s in subsets if abs(required_thurs - s[2]) == min_th_diff]
+				# entre los candidatos, seleccionar el que minimice la diferencia de ventas
+				best = min(candidates, key=lambda x: abs(x[0] - target))
+				return best[1], best[2]
+
 			if n <= 20:
-				subsets = subset_sums(vals)
-				best = min(subsets, key=lambda x: abs(x[0] - target))
-				best_idxs = best[1]
+				subsets = subset_sums_with_th(vals, th_counts)
+				best_idxs, best_th = pick_best(subsets)
 			else:
 				# split
 				h = n // 2
-				A = vals[:h]
-				B = vals[h:]
-				sa = subset_sums(A)
-				sb = subset_sums(B)
+				A_vals = vals[:h]
+				B_vals = vals[h:]
+				A_th = th_counts[:h]
+				B_th = th_counts[h:]
+				sa = subset_sums_with_th(A_vals, A_th)
+				sb = subset_sums_with_th(B_vals, B_th)
 				sa_sorted = sorted(sa, key=lambda x: x[0])
 				sb_sorted = sorted(sb, key=lambda x: x[0])
 				import bisect
 				b_sums = [x[0] for x in sb_sorted]
 				best_diff = None
-				for s_a, idxs_a in sa_sorted:
+				best_combo = None
+				# intentamos combinar; priorizamos minimizar (abs(required_thurs - th_total), abs(total-target))
+				for s_a, idxs_a, th_a in sa_sorted:
 					need = target - s_a
 					i = bisect.bisect_left(b_sums, need)
-					for j in (i-1, i, i+1):
-						if 0 <= j < len(b_sums):
-							s_b, idxs_b = sb_sorted[j]
-							total = s_a + s_b
-							diff = abs(total - target)
-							if best_diff is None or diff < best_diff:
-								best_diff = diff
-								best_idxs = idxs_a + [i + h for i in idxs_b]
+					# revisar un rango razonable de vecinos alrededor de i para encontrar buenas combinaciones
+					for j in range(max(0, i-5), min(len(b_sums), i+6)):
+						s_b, idxs_b, th_b = sb_sorted[j]
+						total = s_a + s_b
+						diff = abs(total - target)
+						th_total = th_a + th_b
+						metric = (abs(required_thurs - th_total), diff)
+						if best_combo is None:
+							best_combo = (idxs_a, idxs_b, th_total, metric)
+						else:
+							# comparar por métrica lexicográfica: primero distancia en jueves, después diff
+							if metric < best_combo[3]:
+								best_combo = (idxs_a, idxs_b, th_total, metric)
+				# convertir indices de B ajustando offset
+				if best_combo:
+					idxs_a, idxs_b, best_th, _ = best_combo
+					best_idxs = idxs_a + [i + h for i in idxs_b]
 
 			# archivos elegidos (map indices back to active candidates)
 			chosen_candidates = [active_candidates[i] for i in best_idxs]
 			# convert to (file, date_or_range, value) tuples for downstream code
 			chosen = [(c[0], c[1], c[2]) for c in chosen_candidates]
+			# si el toggle evita jueves está desactivado, comprobar que la selección
+			# contiene el número de jueves requerido. Si no, avisar en rojo.
+			if not avoid_thurs:
+				try:
+					chosen_th_count = sum([c[3] for c in chosen_candidates])
+					if chosen_th_count < required_thurs:
+						if chosen_th_count == 0:
+							st.error(f"Los ficheros consultados solo contienen 0 jueves mientras que el rango requiere {required_thurs} jueves.")
+						else:
+							st.warning(f"Los ficheros consultados contienen {chosen_th_count} jueves mientras que el rango requiere {required_thurs} jueves. Se usarán datos disponibles.")
+				except Exception:
+					pass
 			if not chosen:
 				st.info('No se encontró una combinación útil de ficheros.')
 			else:
 				chosen_files = [c[0] for c in chosen]
+				# construir lista de ficheros jueves usados (incluye duplicados si el mismo fichero aparece varias veces)
+				chosen_thurs_files = []
+				for c in chosen_candidates:
+					try:
+						# si el candidato tiene cuenta de jueves en la posición 3 (item_entries), úsala
+						if len(c) >= 4 and isinstance(c[3], int):
+							thc = int(c[3])
+						else:
+							# fallback: parsear nombre y calcular si es jueves o rango con jueves
+							parsed = parse_fname_dates(c[0])
+							thc = 0
+							if isinstance(parsed, tuple):
+								s_, e_ = parsed
+								cur_ = s_
+								while cur_ <= e_:
+									if cur_.weekday() == 3:
+										thc += 1
+									cur_ = cur_ + _td(days=1)
+							else:
+								if parsed.weekday() == 3:
+									thc = 1
+						# si este candidato aporta al menos un jueves, añadir su nombre (una vez por aparición)
+						if thc > 0:
+							chosen_thurs_files.append(c[0].name)
+					except Exception:
+						pass
 				# suma de ventas reales asociadas a los ficheros elegidos
 				chosen_sales_total = sum(c[2] for c in chosen)
 				diff_sales = chosen_sales_total - res['total'] 
@@ -702,7 +820,8 @@ if st.button("Calcular ventas"):
 						'prod_revisar': prod_revisar,
 						'agg': agg,
 						'df_inv': df_inv,
-						'chosen_files': [p.name for p in chosen_files],
+							'chosen_files': [p.name for p in chosen_files],
+							'chosen_thurs': chosen_thurs_files,
 						'summary_masas': summary_masas,
 						# incluir resumen de ventas para mostrar en render_saved_results
 						'summary': {
