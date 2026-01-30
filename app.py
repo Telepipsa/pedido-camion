@@ -752,7 +752,10 @@ if st.button("Calcular ventas"):
 					order_df = merged[['Codigo', 'Articulo', 'Unidad_de_Medida', 'Cantidad_a_pedir']]
 					# Eliminar de 'Cantidad a pedir' los productos cuyo nombre empiece por ZZ o YY (case-insensitive)
 					if 'Articulo' in order_df.columns:
+						# excluir artículos que empiecen por ZZ o YY, excepto el producto con código GAMBC
 						mask_drop = order_df['Articulo'].astype(str).str.upper().str.startswith(('ZZ', 'YY'), na=False)
+						mask_exception = order_df['Codigo'].astype(str).str.strip().str.upper() == 'GAMBC'
+						mask_drop = mask_drop & (~mask_exception)
 						if mask_drop.any():
 							order_df = order_df.loc[~mask_drop].reset_index(drop=True)
 
@@ -791,7 +794,10 @@ if st.button("Calcular ventas"):
 						prod_revisar = pd.concat([inv_part[cols], agg_only[cols]], ignore_index=True, sort=False)
 						# eliminar productos cuyo nombre empiece por ZZ o YY
 						if 'Articulo' in prod_revisar.columns:
+							# excluir artículos que empiecen por ZZ o YY, excepto el producto con código GAMBC
 							mask_drop_rev = prod_revisar['Articulo'].astype(str).str.upper().str.startswith(('ZZ', 'YY'), na=False)
+							mask_exception_rev = prod_revisar['Codigo'].astype(str).str.strip().str.upper() == 'GAMBC'
+							mask_drop_rev = mask_drop_rev & (~mask_exception_rev)
 							if mask_drop_rev.any():
 								prod_revisar = prod_revisar.loc[~mask_drop_rev].reset_index(drop=True)
 						# además, añadir todos los productos cuyo Consumo sea 0 (si no están ya en la tabla)
