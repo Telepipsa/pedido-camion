@@ -18,43 +18,142 @@ def render_saved_results(res):
 	# Mostrar resumen de ventas (permanente mientras haya resultados guardados)
 	summary = res.get('summary')
 	if summary:
-		st.markdown('### Resumen de ventas')
-		st.write(f"Total ventas reales (disponibles en venta.xlsx): {summary.get('total_real', 0):,.2f}")
-		st.write(f"Total ventas estimadas usadas (venta_estimada): {summary.get('total_estim_used', 0):,.2f}")
-		st.write(f"Total combinado: {summary.get('total', 0):,.2f}")
-		# mostrar ventas asociadas a ficheros si están disponibles
-		if 'chosen_sales_total' in res:
-			st.write(f"Total ventas asociadas a ficheros usados: {res.get('chosen_sales_total', 0):,.2f}")
-			st.write(f"Diferencia con total combinado: {res.get('diff_sales', 0):,.2f}")
+		# Toggle button to show/hide resumen
+		if 'show_summary_details' not in st.session_state:
+			st.session_state['show_summary_details'] = False
+		btn_label = f"Resumen de ventas {'🙈' if st.session_state.get('show_summary_details') else '👁️'}"
+		if st.button(btn_label, key='toggle_summary'):
+			st.session_state['show_summary_details'] = not st.session_state.get('show_summary_details', False)
+		# mostrar detalles solo si está activo
+		if st.session_state.get('show_summary_details'):
+			st.write(f"Total ventas reales (disponibles en venta.xlsx): {summary.get('total_real', 0):,.2f}")
+			st.write(f"Total ventas estimadas usadas (venta_estimada): {summary.get('total_estim_used', 0):,.2f}")
+			st.write(f"Total combinado: {summary.get('total', 0):,.2f}")
+			# mostrar ventas asociadas a ficheros si están disponibles
+			if 'chosen_sales_total' in res:
+				st.write(f"Total ventas asociadas a ficheros usados: {res.get('chosen_sales_total', 0):,.2f}")
+				st.write(f"Diferencia con total combinado: {res.get('diff_sales', 0):,.2f}")
 
+			# Mostrar ficheros usados y recuento de jueves (si hay)
+			st.write(f"Ficheros usados: {', '.join(res.get('chosen_files', []))}")
+			thurs_used = res.get('chosen_thurs', [])
+			if thurs_used:
+				# calcular total de jueves representados por los nombres de fichero (contando duplicados)
+				def _count_thurs_in_name(nm):
+					from datetime import datetime, timedelta
+					s = str(nm)
+					if s.lower().endswith('.csv'):
+						s = s[:-4]
+					# rango como DD-MM-YY_DD-MM-YY
+					if '_' in s:
+						parts = s.split('_')
+						if len(parts) >= 2:
+							try:
+								start = datetime.strptime(parts[0], '%d-%m-%y').date()
+								end = datetime.strptime(parts[1], '%d-%m-%y').date()
+							except Exception:
+								return 0
+							cnt = 0
+							cur = start
+							while cur <= end:
+								if cur.weekday() == 3:
+									cnt += 1
+								cur = cur + timedelta(days=1)
+							return cnt
+						return 0
+					else:
+						try:
+							d = datetime.strptime(s, '%d-%m-%y').date()
+							return 1 if d.weekday() == 3 else 0
+						except Exception:
+							return 0
+				total_th = sum(_count_thurs_in_name(n) for n in thurs_used)
+				st.write(f"Ficheros jueves usados: {', '.join(thurs_used)} ({total_th} jueves)")
+		# (Ficheros usados y conteo de jueves se muestran dentro del toggle 'Resumen de ventas')
 	st.markdown('### Cantidad a pedir')
-	st.write(f"Ficheros usados: {', '.join(res.get('chosen_files', []))}")
-	# mostrar ficheros jueves usados (si los hay), incluyendo duplicados
-	thurs_used = res.get('chosen_thurs', [])
-	if thurs_used:
-		st.write(f"Ficheros jueves usados: {', '.join(thurs_used)}")
-	st.info('''**Ajustes aplicados**
+	
+	# Mostrar ajustes aplicados y, si procede, el +/- aplicado al colchón
+	colchon_base_pct = 20
+	colchon_extra_str = ""
+	try:
+		total_for_summary = summary.get('total', 0) if summary else 0
+		chosen_sales_for_summary = res.get('chosen_sales_total', 0)
+		if total_for_summary:
+			raw_pct = (float(total_for_summary) - float(chosen_sales_for_summary or 0)) / float(total_for_summary)
+			if abs(raw_pct) >= 0.01:
+				sign_pct = int(round(raw_pct * 100))
+				colchon_extra_str = f" ({'+' if sign_pct>0 else ''}{sign_pct}%)"
+	except Exception:
+		colchon_extra_str = ""
+	st.info(f"""**Ajustes aplicados**
 
-	- Colchon 20%
+	- Colchon {colchon_base_pct}%{colchon_extra_str}
 	- Desperdicio -4%
-	- Masas descongelación: 4 días''')
+	- Masas descongelación: 4 días""")
 	order_df = res.get('order_df')
 	if order_df is None:
 		st.info('No hay tabla `Cantidad a pedir` disponible.')
 	else:
+		# --- Tablas por tipo: Congelado / Fresco / Seco (productos con Cantidad_a_pedir > 0)
+		try:
+			odf = order_df.copy()
+			# asegurar columnas necesarias
+			if 'Cantidad_a_pedir' in odf.columns and 'Codigo' in odf.columns:
+				# normalizar codigo para comparar
+				odf['__COD__'] = odf['Codigo'].astype(str).str.strip().str.upper().str.replace(' ', '')
+				# cargar listas de códigos desde los csv de congelado/fresco (si existen)
+				cong_path = Path('congelado.csv')
+				fres_path = Path('fresco.csv')
+				cong_codes = set()
+				fres_codes = set()
+				if cong_path.exists():
+					try:
+						df_cong = pd.read_csv(cong_path, encoding='utf-8')
+					except Exception:
+						df_cong = pd.read_csv(cong_path, encoding='latin-1')
+					if 'Codigo' in df_cong.columns:
+						cong_codes = set(df_cong['Codigo'].astype(str).str.strip().str.upper().str.replace(' ', ''))
+				if fres_path.exists():
+					try:
+						df_fres = pd.read_csv(fres_path, encoding='utf-8')
+					except Exception:
+						df_fres = pd.read_csv(fres_path, encoding='latin-1')
+					if 'Codigo' in df_fres.columns:
+						fres_codes = set(df_fres['Codigo'].astype(str).str.strip().str.upper().str.replace(' ', ''))
+				# filtros
+				mask_positive = pd.to_numeric(odf['Cantidad_a_pedir'], errors='coerce').fillna(0) > 0
+				mask_cong = odf['__COD__'].isin(cong_codes)
+				mask_fres = odf['__COD__'].isin(fres_codes)
+				congelado_tbl = odf.loc[mask_positive & mask_cong].drop(columns=['__COD__']).reset_index(drop=True)
+				fresco_tbl = odf.loc[mask_positive & mask_fres].drop(columns=['__COD__']).reset_index(drop=True)
+				seco_tbl = odf.loc[mask_positive & ~(mask_cong | mask_fres)].drop(columns=['__COD__']).reset_index(drop=True)
+				# mostrar solo si tienen filas
+				if not congelado_tbl.empty:
+					st.markdown("<h3 style='color:#88DDEE'>Congelado</h3>", unsafe_allow_html=True)
+					st.dataframe(congelado_tbl)
+				if not fresco_tbl.empty:
+					st.markdown("<h3 style='color:#CFFFD6'>Fresco</h3>", unsafe_allow_html=True)
+					st.dataframe(fresco_tbl)
+				if not seco_tbl.empty:
+					st.markdown("<h3 style='color:#FFB347'>Seco</h3>", unsafe_allow_html=True)
+					st.dataframe(seco_tbl)
+		except Exception:
+			# no bloquear la interfaz si hay un error mostrando estas tablas
+			pass
+
+		prod_revisar = res.get('prod_revisar')
+		if prod_revisar is not None and not prod_revisar.empty:
+			st.markdown("<h3 style='color:#FFB6B6'>Productos a Revisar</h3>", unsafe_allow_html=True)
+			st.dataframe(prod_revisar.reset_index(drop=True))
+		else:
+			st.info('No hay productos a revisar.')
+
 		# checkbox solo cuando existe la tabla
 		hide_zero_local = st.checkbox("Ocultar cantidad 0", value=True, key='hide_zero_order')
 		df_disp = order_df.copy()
 		if hide_zero_local and 'Cantidad_a_pedir' in df_disp.columns:
 			df_disp = df_disp.loc[df_disp['Cantidad_a_pedir'] != 0].reset_index(drop=True)
 		st.dataframe(df_disp)
-
-	prod_revisar = res.get('prod_revisar')
-	if prod_revisar is not None and not prod_revisar.empty:
-		st.markdown('### Productos a Revisar')
-		st.dataframe(prod_revisar.reset_index(drop=True))
-	else:
-		st.info('No hay productos a revisar.')
 
 	agg = res.get('agg')
 	if agg is not None:
@@ -297,7 +396,7 @@ else:
 # (Los resultados guardados se mostrarán debajo del botón "Calcular ventas"
 # para que los toggles no oculten el propio botón.)
 
-if st.button("Calcular ventas"):
+if st.button("Calcular Pedido"):
 	base = Path('.')
 	res = summarize_range(base, start_sel, end_sel)
 	# alert if there are missing days without real or estimated data
@@ -739,17 +838,43 @@ if st.button("Calcular ventas"):
 					consumo_adj = merged['Consumo'] * cons_multiplier
 					real_adj = merged['Real'] * inv_multiplier
 					# Ajuste porcentual según diferencia entre Total combinado y ventas asociadas
+					# Aplicar solo si la diferencia relativa es al menos 1% (0.01).
 					adj_pct = 0.0
 					try:
-						total_combined = float(res['total'])
-						chosen_total = float(chosen_sales_total)
+						total_combined = float(res.get('total', 0) or 0)
+						chosen_total = float(chosen_sales_total or 0)
 						if total_combined != 0:
-							adj_pct = (total_combined - chosen_total) / total_combined
+							raw_pct = (total_combined - chosen_total) / total_combined
+							# solo aplicar si la diferencia es >= 1%
+							if abs(raw_pct) >= 0.01:
+								adj_pct = raw_pct
+							else:
+								adj_pct = 0.0
 					except Exception:
 						adj_pct = 0.0
+
 					merged['Cantidad_a_pedir'] = ((consumo_adj - real_adj) * (1.0 + adj_pct)).clip(lower=0).round(2)
 
 					order_df = merged[['Codigo', 'Articulo', 'Unidad_de_Medida', 'Cantidad_a_pedir']]
+					# Redondear a enteros (0.5 hacia arriba) cuando Unidad_de_Medida sea 'Bola' o 'Unidad'
+					try:
+						if 'Unidad_de_Medida' in order_df.columns and 'Cantidad_a_pedir' in order_df.columns:
+							mask_round = order_df['Unidad_de_Medida'].astype(str).str.strip().str.lower().isin(['bola', 'unidad'])
+							if mask_round.any():
+								import math
+								def _round_half_up(x):
+									try:
+										f = float(x)
+									except Exception:
+										return x
+									# usar floor/ceil para garantizar .5 -> arriba
+									if f - math.floor(f) >= 0.5:
+										return int(math.ceil(f))
+									else:
+										return int(math.floor(f))
+								order_df.loc[mask_round, 'Cantidad_a_pedir'] = order_df.loc[mask_round, 'Cantidad_a_pedir'].apply(_round_half_up)
+					except Exception:
+						pass
 					# Eliminar de 'Cantidad a pedir' los productos cuyo nombre empiece por ZZ o YY (case-insensitive)
 					if 'Articulo' in order_df.columns:
 						# excluir artículos que empiecen por ZZ o YY, excepto el producto con código GAMBC

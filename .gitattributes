@@ -1,0 +1,12 @@
+# Normalize text files and enforce LF for CSV and Python files
+* text=auto
+
+# Force LF for CSV and Python to avoid CRLF-related diffs on Windows
+*.csv text eol=lf
+*.py  text eol=lf
+*.md  text eol=lf
+
+# Prevent treating binary files as text
+*.png binary
+*.jpg binary
+*.exe binary
