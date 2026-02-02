@@ -664,6 +664,63 @@ if bulk_uploads:
 			st.sidebar.error(f"Error guardando {up.name}: {e}")
 	if saved_b:
 		st.sidebar.success(f"Guardados en ficheros_a_convertir_bulk: {', '.join(saved_b)}")
+# --- Uploaders para ficheros maestros de secciones (congelado, fresco, seco)
+st.sidebar.markdown("---")
+st.sidebar.write("Subir ficheros maestros para las secciones (opcional). Se guardarán en las carpetas `congelado/`, `fresco/`, `seco/`.")
+
+# congelado
+congelado_dir = Path('congelado')
+congelado_dir.mkdir(parents=True, exist_ok=True)
+congelado_uploads = st.sidebar.file_uploader("Subir ficheros para 'congelado' - varios permitidos", type=['xls', 'xlsx'], accept_multiple_files=True, key='congelado_uploader')
+if congelado_uploads:
+	saved_c = []
+	for up in congelado_uploads:
+		try:
+			fn = up.name
+			target = congelado_dir / fn
+			with open(target, 'wb') as fh:
+				fh.write(up.getvalue())
+			saved_c.append(fn)
+		except Exception as e:
+			st.sidebar.error(f"Error guardando {up.name} en congelado/: {e}")
+	if saved_c:
+		st.sidebar.success(f"Guardados en congelado/: {', '.join(saved_c)}")
+
+# fresco
+fresco_dir = Path('fresco')
+fresco_dir.mkdir(parents=True, exist_ok=True)
+fresco_uploads = st.sidebar.file_uploader("Subir ficheros para 'fresco' - varios permitidos", type=['xls', 'xlsx'], accept_multiple_files=True, key='fresco_uploader')
+if fresco_uploads:
+	saved_f = []
+	for up in fresco_uploads:
+		try:
+			fn = up.name
+			target = fresco_dir / fn
+			with open(target, 'wb') as fh:
+				fh.write(up.getvalue())
+			saved_f.append(fn)
+		except Exception as e:
+			st.sidebar.error(f"Error guardando {up.name} en fresco/: {e}")
+	if saved_f:
+		st.sidebar.success(f"Guardados en fresco/: {', '.join(saved_f)}")
+
+# seco
+seco_dir = Path('seco')
+seco_dir.mkdir(parents=True, exist_ok=True)
+seco_uploads = st.sidebar.file_uploader("Subir ficheros para 'seco' - varios permitidos", type=['xls', 'xlsx'], accept_multiple_files=True, key='seco_uploader')
+if seco_uploads:
+	saved_s = []
+	for up in seco_uploads:
+		try:
+			fn = up.name
+			target = seco_dir / fn
+			with open(target, 'wb') as fh:
+				fh.write(up.getvalue())
+			saved_s.append(fn)
+		except Exception as e:
+			st.sidebar.error(f"Error guardando {up.name} en seco/: {e}")
+	if saved_s:
+		st.sidebar.success(f"Guardados en seco/: {', '.join(saved_s)}")
 # --- Selector de rango de fechas en la página principal
 from datetime import date, timedelta
 from scripts.sales_utils import summarize_range
