@@ -11,6 +11,171 @@ st.title("🚚 Pedido Camión")
 # Toggle to avoid using files that contain Thursdays when selecting
 avoid_thurs = st.checkbox("Evitar usar ficheros con jueves en su rango (cuando sea posible)", value=False)
 
+# --- Mostrar inventario/maestro por carpeta (congelado / fresco / seco)
+def _load_items_from_folder(folder: Path):
+	out_rows = []
+	if not folder.exists():
+		return []
+	files = list(folder.glob('*.xls')) + list(folder.glob('*.xlsx'))
+	for f in files:
+		# read without header to detect where real header sits
+		try:
+			raw = pd.read_excel(f, header=None, engine='xlrd' if f.suffix.lower()=='.xls' else 'openpyxl')
+		except Exception:
+			try:
+				raw = pd.read_excel(f, header=None)
+			except Exception:
+				continue
+
+		# try to detect header row by looking for known keywords
+		header_keywords = ['articulo', 'artículo', 'codigo', 'código', 'unid', 'unid. totales', 'unid. totales', 'medida', 'embalaje', 'nombre']
+		header_row = None
+		max_search = min(40, len(raw))
+		for i in range(max_search):
+			row_vals = [str(x).strip().lower() if pd.notna(x) else '' for x in raw.iloc[i].tolist()]
+			# count matches
+			matches = sum(1 for h in header_keywords if any(h in v for v in row_vals))
+			if matches >= 2:
+				header_row = i
+				break
+
+		if header_row is None:
+			# fallback: assume header at row 0
+			header_row = 0
+
+		# create df with proper header
+		header = raw.iloc[header_row].astype(str).tolist()
+		df = raw.iloc[header_row+1:].copy()
+		df.columns = [str(c).strip() for c in header]
+
+		# candidate column names for each target (case-insensitive)
+		def find_col(dfcols, candidates):
+			lower_map = {str(c).strip().lower(): c for c in dfcols}
+			for cand in candidates:
+				if cand.lower() in lower_map:
+					return lower_map[cand.lower()]
+			# try partial contains
+			for cand in candidates:
+				for lc, orig in lower_map.items():
+					if cand.lower() in lc or lc in cand.lower():
+						return orig
+			return None
+
+		name_col = find_col(df.columns, ['Articulo', 'Artículo', 'Nombre'])
+		code_col = find_col(df.columns, ['Codigo', 'Código', 'Cod'])
+		units_col = find_col(df.columns, ['Unid. Totales', 'Unid Totales', 'Unidades totales', 'Unidades', 'Total'])
+		measure_col = find_col(df.columns, ['Medida', 'Unidad_de_Medida', 'Unidad'])
+		pack_col = find_col(df.columns, ['Embalaje', 'Packaging', 'Envase'])
+
+		# merge rows where product name and its metrics are split across two rows
+		i = 0
+		n = len(df)
+		while i < n:
+			row = df.iloc[i]
+			name_val = row.get(name_col) if name_col is not None else None
+			code_val = row.get(code_col) if code_col is not None else None
+			units_val = row.get(units_col) if units_col is not None else None
+			measure_val = row.get(measure_col) if measure_col is not None else None
+			pack_val = row.get(pack_col) if pack_col is not None else None
+
+			# if this row appears to contain only the name and next row has details, merge them
+			merged = False
+			if (pd.isna(code_val) or code_val == '' or str(code_val).strip().lower() in ('nan', 'none')) and name_val and (i + 1) < n:
+				row2 = df.iloc[i+1]
+				code2 = row2.get(code_col) if code_col is not None else None
+				units2 = row2.get(units_col) if units_col is not None else None
+				measure2 = row2.get(measure_col) if measure_col is not None else None
+				pack2 = row2.get(pack_col) if pack_col is not None else None
+				# if next row contains a code or units, treat as the companion row
+				if (pd.notna(code2) and str(code2).strip() not in ('', 'nan', 'None')) or (pd.notna(units2) and str(units2).strip() not in ('', 'nan', 'None')):
+					out_rows.append({
+						'Nombre': name_val,
+						'Codigo': code2,
+						'Unidades totales': units2,
+						'Medida': measure2,
+						'Embalaje': pack2,
+						'Origen fichero': f.name
+					})
+					merged = True
+
+			if not merged:
+				out_rows.append({
+					'Nombre': name_val,
+					'Codigo': code_val,
+					'Unidades totales': units_val,
+					'Medida': measure_val,
+					'Embalaje': pack_val,
+					'Origen fichero': f.name
+				})
+			i += 2 if merged else 1
+
+	return out_rows
+
+
+# Mostrar tabla maestra de productos por carpeta
+# Cargar maestro en background (oculto). No mostrar selector ni cabecera.
+folder_choice = 'Todos'
+
+def _collect_for(choice: str):
+	rows = []
+	base = Path('.')
+	if choice in ('congelado', 'Todos'):
+		rows += _load_items_from_folder(base / 'congelado')
+	if choice in ('fresco', 'Todos'):
+		rows += _load_items_from_folder(base / 'fresco')
+	if choice in ('seco', 'Todos'):
+		rows += _load_items_from_folder(base / 'seco')
+	return rows
+
+col_rows = _collect_for(folder_choice)
+if col_rows:
+	df_master = pd.DataFrame(col_rows)
+	# normalizar nombres de columnas al pedido del usuario
+	# mostrar sólo las columnas solicitadas (ocultar 'Origen fichero')
+	display_cols = ['Nombre', 'Codigo', 'Unidades totales', 'Medida', 'Embalaje']
+	for c in display_cols:
+		if c not in df_master.columns:
+			df_master[c] = None
+
+	# Filtrar filas sin Código (no mostrar filas que carezcan de código válido)
+	try:
+		df_master['Codigo'] = df_master['Codigo'].astype(object)
+		mask_has_code = df_master['Codigo'].notna() & (df_master['Codigo'].astype(str).str.strip() != '')
+		df_master = df_master.loc[mask_has_code].reset_index(drop=True)
+	except Exception:
+		# en caso de error, no romper la UI; mostrar lo que haya
+		pass
+
+	# Normalizar números en 'Unidades totales' y 'Embalaje' y calcular unidades por embalaje
+	try:
+		# limpiar comas y convertir a float
+		df_master['Unidades totales'] = pd.to_numeric(df_master['Unidades totales'].astype(str).str.replace(',', '.'), errors='coerce')
+		df_master['Embalaje'] = pd.to_numeric(df_master['Embalaje'].astype(str).str.replace(',', '.'), errors='coerce')
+		def compute_upack(row):
+			try:
+				u = float(row['Unidades totales'])
+				e = float(row['Embalaje'])
+				if pd.isna(u) or pd.isna(e) or e == 0:
+					return None
+				val = u / e
+				# mostrar entero cuando es casi entero
+				if abs(val - round(val)) < 1e-8:
+					return int(round(val))
+				return round(val, 4)
+			except Exception:
+				return None
+		df_master['Unidades_por_embalaje'] = df_master.apply(compute_upack, axis=1)
+	except Exception:
+		df_master['Unidades_por_embalaje'] = None
+
+	# Guardar maestro en session_state (oculto)
+	try:
+		st.session_state['df_master'] = df_master
+	except Exception:
+		pass
+else:
+	st.info('No se han encontrado ficheros válidos en la(s) carpeta(s) seleccionadas.')
+
 # Helper: render saved results (so toggles/re-runs don't lose the last calculation)
 def render_saved_results(res):
 	if not res:
@@ -127,16 +292,49 @@ def render_saved_results(res):
 				congelado_tbl = odf.loc[mask_positive & mask_cong].drop(columns=['__COD__']).reset_index(drop=True)
 				fresco_tbl = odf.loc[mask_positive & mask_fres].drop(columns=['__COD__']).reset_index(drop=True)
 				seco_tbl = odf.loc[mask_positive & ~(mask_cong | mask_fres)].drop(columns=['__COD__']).reset_index(drop=True)
-				# mostrar solo si tienen filas
+				# calcular 'Embalajes_a_pedir' = ceil(Cantidad_a_pedir / Unidades_por_embalaje) cuando sea posible
+				# checkbox para mostrar Unidades_por_embalaje en las tablas (oculto por defecto)
+				show_upe = st.checkbox("Mostrar 'Unidades_por_embalaje' en tablas (congelado/fresco/seco)", value=False, key='show_upe')
+				def _compute_embalajes(df):
+					import math
+					if 'Cantidad_a_pedir' not in df.columns:
+						return df
+					# asegurar columna Unidades_por_embalaje si no existe
+					if 'Unidades_por_embalaje' not in df.columns:
+						df['Unidades_por_embalaje'] = None
+					def _calc(row):
+						try:
+							q = float(row['Cantidad_a_pedir'])
+							upe = row['Unidades_por_embalaje']
+							if pd.isna(upe) or upe is None:
+								return None
+							up = float(upe)
+							if up == 0:
+								return None
+							val = math.ceil(q / up)
+							return int(val)
+						except Exception:
+							return None
+					df['Embalajes_a_pedir'] = df.apply(_calc, axis=1)
+					return df
+
+				congelado_tbl = _compute_embalajes(congelado_tbl)
+				fresco_tbl = _compute_embalajes(fresco_tbl)
+				seco_tbl = _compute_embalajes(seco_tbl)
+
+				# mostrar solo si tienen filas; ocultar columna Unidades_por_embalaje por defecto
 				if not congelado_tbl.empty:
 					st.markdown("<h3 style='color:#88DDEE'>Congelado</h3>", unsafe_allow_html=True)
-					st.dataframe(congelado_tbl)
+					display_cols = [c for c in congelado_tbl.columns if c != 'Unidades_por_embalaje' or show_upe]
+					st.dataframe(congelado_tbl[display_cols])
 				if not fresco_tbl.empty:
 					st.markdown("<h3 style='color:#CFFFD6'>Fresco</h3>", unsafe_allow_html=True)
-					st.dataframe(fresco_tbl)
+					display_cols = [c for c in fresco_tbl.columns if c != 'Unidades_por_embalaje' or show_upe]
+					st.dataframe(fresco_tbl[display_cols])
 				if not seco_tbl.empty:
 					st.markdown("<h3 style='color:#FFB347'>Seco</h3>", unsafe_allow_html=True)
-					st.dataframe(seco_tbl)
+					display_cols = [c for c in seco_tbl.columns if c != 'Unidades_por_embalaje' or show_upe]
+					st.dataframe(seco_tbl[display_cols])
 		except Exception:
 			# no bloquear la interfaz si hay un error mostrando estas tablas
 			pass
@@ -310,12 +508,98 @@ if bulk_dir.exists() and st.sidebar.button("Convertir bulk XLS (añadir segundo 
 				continue
 
 			save_df = table[['Codigo', 'Articulo', 'Unidad_de_Medida', cons_col]].rename(columns={cons_col: 'Consumo'})
-			# nombre base por fecha interna
-			base_name = date.strftime('%d-%m-%y')
-			# calcular segundo jueves relativo a la fecha interna
-			second = second_thursday_from(date)
-			suffix = second.strftime('%d-%m-%y')
-			fname = f"{base_name}_{suffix}.csv"
+			# determinar base_name y sufijo final
+			# Preferimos usar la primera y segunda "Fecha de grabación" dentro del fichero
+			from scripts.parser import _read_excel_fallback
+			raw_df = None
+			try:
+				raw_df = _read_excel_fallback(file)
+			except Exception:
+				raw_df = None
+
+			def _extract_all_dates(df):
+				import re
+				from datetime import datetime
+				if df is None:
+					return []
+				res = []
+				def norm(s):
+					try:
+						return re.sub(r'\s+', ' ', str(s)).strip()
+					except Exception:
+						return ''
+				# pattern for full datetime and date
+				patterns = [re.compile(r'(\d{1,2}/\d{1,2}/\d{4}\s*\d{1,2}:\d{2}:\d{2})'), re.compile(r'(\d{1,2}/\d{1,2}/\d{4})')]
+				rows, cols = df.shape
+				for r in range(rows):
+					for c in range(cols):
+						cell = norm(df.iat[r, c])
+						if not cell:
+							continue
+						# direct match
+						for p in patterns:
+							m = p.search(cell)
+							if m:
+								found = m.group(1)
+								for fmt in ('%d/%m/%Y %H:%M:%S', '%d/%m/%Y'):
+									try:
+										res.append(datetime.strptime(found, fmt))
+										break
+									except Exception:
+										continue
+				# also look for label 'fecha de grabaci' and check right-side cells
+				for r in range(rows):
+					for c in range(cols):
+						cell = norm(df.iat[r, c]).strip("'\"")
+						if 'fecha de grabaci' in cell.lower():
+							for c2 in range(c+1, min(cols, c+6)):
+								v = df.iat[r, c2]
+								if v is None or (isinstance(v, float) and pd.isna(v)):
+									continue
+								# numeric excel serial
+								try:
+									if isinstance(v, (int, float)):
+										dt = pd.to_datetime(v, unit='d', origin='1899-12-30', errors='coerce')
+										if not pd.isna(dt):
+											res.append(dt.to_pydatetime())
+										continue
+								except Exception:
+									pass
+								s2 = norm(v).strip("'\"")
+								for fmt in ('%d/%m/%Y %H:%M:%S', '%d/%m/%Y', '%Y-%m-%d %H:%M:%S'):
+									try:
+										res.append(datetime.strptime(s2, fmt))
+										break
+									except Exception:
+										continue
+				# remove duplicates while preserving order
+				seen = set()
+				out = []
+				for d in res:
+					key = d.strftime('%Y-%m-%d %H:%M:%S')
+					if key not in seen:
+						seen.add(key)
+						out.append(d)
+				return out
+
+			all_dates = _extract_all_dates(raw_df)
+			if len(all_dates) >= 2:
+				base_dt = all_dates[0]
+				end_dt = all_dates[1] - timedelta(days=1)
+				base_name = base_dt.strftime('%d-%m-%y')
+				suffix = end_dt.strftime('%d-%m-%y')
+				fname = f"{base_name}_{suffix}.csv"
+			else:
+				# fallback to previous behavior (use the single internal date and compute second thursday)
+				if date is None:
+					results.append((file.name, 'NO_DATE', 'No se encontró fecha interna'))
+					continue
+				base_name = date.strftime('%d-%m-%y')
+				second = second_thursday_from(date)
+				suffix = second.strftime('%d-%m-%y')
+				fname = f"{base_name}_{suffix}.csv"
+
+			# guardar fichero resultante (aplicable en ambos casos)
 			target = dst_dir / fname
 			try:
 				if target.exists():
@@ -856,6 +1140,44 @@ if st.button("Calcular Pedido"):
 					merged['Cantidad_a_pedir'] = ((consumo_adj - real_adj) * (1.0 + adj_pct)).clip(lower=0).round(2)
 
 					order_df = merged[['Codigo', 'Articulo', 'Unidad_de_Medida', 'Cantidad_a_pedir']]
+
+					# Añadir columna `Unidades_por_embalaje` tomando los valores del maestro (congelado/fresco/seco)
+					try:
+						# recolectar maestro combinado
+						master_rows = _collect_for('Todos')
+						if master_rows:
+							df_master_all = pd.DataFrame(master_rows)
+						else:
+							df_master_all = pd.DataFrame(columns=['Nombre', 'Codigo', 'Unidades totales', 'Medida', 'Embalaje', 'Origen fichero'])
+
+						# normalizar y calcular Unidades_por_embalaje en el maestro
+						try:
+							df_master_all['Unidades totales'] = pd.to_numeric(df_master_all['Unidades totales'].astype(str).str.replace(',', '.'), errors='coerce')
+							df_master_all['Embalaje'] = pd.to_numeric(df_master_all['Embalaje'].astype(str).str.replace(',', '.'), errors='coerce')
+							def _calc_upe(r):
+								try:
+									u = float(r['Unidades totales'])
+									e = float(r['Embalaje'])
+									if pd.isna(u) or pd.isna(e) or e == 0:
+										return None
+									val = u / e
+									if abs(val - round(val)) < 1e-8:
+										return int(round(val))
+									return round(val, 4)
+								except Exception:
+									return None
+							df_master_all['Unidades_por_embalaje'] = df_master_all.apply(_calc_upe, axis=1)
+						except Exception:
+							df_master_all['Unidades_por_embalaje'] = None
+
+						# construir mapping por codigo (normalizado)
+						df_master_all['__COD__'] = df_master_all['Codigo'].astype(str).str.strip().str.upper()
+						mapping = df_master_all.set_index('__COD__')['Unidades_por_embalaje'].to_dict()
+
+						# aplicar al order_df
+						order_df['Unidades_por_embalaje'] = order_df['Codigo'].astype(str).str.strip().str.upper().map(mapping)
+					except Exception:
+						order_df['Unidades_por_embalaje'] = None
 					# Redondear a enteros (0.5 hacia arriba) cuando Unidad_de_Medida sea 'Bola' o 'Unidad'
 					try:
 						if 'Unidad_de_Medida' in order_df.columns and 'Cantidad_a_pedir' in order_df.columns:
