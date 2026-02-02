@@ -174,7 +174,36 @@ if col_rows:
 	except Exception:
 		pass
 else:
-	st.info('No se han encontrado ficheros válidos en la(s) carpeta(s) seleccionadas.')
+	# Diagnóstico: mostrar contenido de las carpetas y errores de lectura
+	base = Path('.')
+	folders = ['congelado', 'fresco', 'seco']
+	st.warning('No se han encontrado ficheros válidos en la(s) carpeta(s) seleccionadas. Mostrando diagnóstico:')
+	for fld in folders:
+		p = base / fld
+		exists = p.exists()
+		files = []
+		if exists:
+			files = sorted([x.name for x in p.iterdir() if x.is_file()])
+		st.write(f"Carpeta `{fld}` — existe: {exists} — archivos encontrados: {len(files)}")
+		if files:
+			st.write(', '.join(files[:50]))
+
+	# Intentar leer el primer .xls/.xlsx de cada carpeta y mostrar excepción (útil en deploy)
+	for fld in folders:
+		p = base / fld
+		if not p.exists():
+			continue
+		for f in sorted(p.iterdir()):
+			if not f.is_file():
+				continue
+			if f.suffix.lower() not in ('.xls', '.xlsx'):
+				continue
+			try:
+				pd.read_excel(f, header=None, nrows=1)
+				st.write(f"Lectura de prueba OK para: {f.name}")
+			except Exception as e:
+				st.write(f"Error de lectura para {f.name}: {e}")
+			break
 
 # Helper: render saved results (so toggles/re-runs don't lose the last calculation)
 def render_saved_results(res):
