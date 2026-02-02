@@ -8,10 +8,231 @@ from scripts.parser import parse_xls
 st.set_page_config(page_title="Pedido Camión", page_icon="🚚", layout="wide")
 
 st.title("🚚 Pedido Camión")
+# Toggle to show/hide conversion buttons in the sidebar (keep False to hide)
+SHOW_CONV_BUTTONS = False
 # Toggle to avoid using files that contain Thursdays when selecting
 avoid_thurs = st.checkbox("Evitar usar ficheros con jueves en su rango (cuando sea posible)", value=False)
 
 # --- Mostrar inventario/maestro por carpeta (congelado / fresco / seco)
+# --- Conversion functions (module-level so upload handlers can call them)
+def convert_all_xls():
+	from pathlib import Path
+	dst_dir = Path("consumo_teorico")
+	dst_dir.mkdir(parents=True, exist_ok=True)
+	src_dir = Path("ficheros_a_convertir")
+	if not src_dir.exists():
+		st.error(f"No existe la carpeta {src_dir}")
+		return
+	files = list(src_dir.glob('*.xls')) + list(src_dir.glob('*.xlsx'))
+	if not files:
+		st.info("No se han encontrado ficheros .xls/.xlsx en ficheros_a_convertir")
+		return
+	results = []
+	for file in files:
+		try:
+			date, table = parse_xls(file)
+		except Exception as e:
+			results.append((file.name, 'ERROR', str(e)))
+			continue
+		if date is None:
+			results.append((file.name, 'NO_DATE', 'No se encontró fecha interna'))
+			continue
+		if table is None or table.empty:
+			results.append((file.name, 'NO_PRODUCTS', 'No se extrajeron líneas de producto'))
+			continue
+		cons_col = None
+		for cand in ['Col_10', 'Col_9', 'Col_11', 'Col_8', 'Col_12']:
+			if cand in table.columns:
+				cons_col = cand
+				break
+		if cons_col is None:
+			for coln in table.columns:
+				if coln not in ('Codigo', 'Articulo', 'Unidad_de_Medida'):
+					cons_col = coln
+					break
+		if cons_col is None:
+			results.append((file.name, 'NO_CONS_COL', 'No se localizó columna Consumo'))
+			continue
+		save_df = table[['Codigo', 'Articulo', 'Unidad_de_Medida', cons_col]].rename(columns={cons_col: 'Consumo'})
+		fname = date.strftime('%d-%m-%y') + '.csv'
+		target = dst_dir / fname
+		try:
+			if target.exists():
+				target.unlink()
+			save_df.to_csv(target, index=False, encoding='utf-8')
+			results.append((file.name, 'SAVED', fname))
+		except Exception as e:
+			results.append((file.name, 'ERROR_SAVE', str(e)))
+	st.markdown('### Resultados de la conversión en lote')
+	for r in results:
+		st.write(f"- {r[0]}: {r[1]} {r[2] if len(r) > 2 else ''}")
+
+
+def convert_inventory_file():
+	file = Path("inventario_actual.xls")
+	if not file.exists():
+		st.error(f"No se encontró el fichero {file}. Debe situarse en la raíz del proyecto.")
+		return
+	st.write(f"Procesando: {file.name}")
+	try:
+		date, table = parse_xls(file)
+	except Exception as e:
+		st.error(f"Error leyendo {file.name}: {e}")
+		return
+	if table is None or table.empty:
+		st.warning("No se han extraído líneas de producto según el patrón especificado.")
+		return
+	dest_dir = Path('inventario_actual')
+	dest_dir.mkdir(parents=True, exist_ok=True)
+	if 'Col_16' not in table.columns:
+		st.error('No se encontró la columna Col_16 necesaria para "Real".')
+		return
+	out = table[['Codigo', 'Articulo', 'Unidad_de_Medida', 'Col_16']].rename(columns={'Col_16': 'Real'})
+	target = dest_dir / 'inventario_real.csv'
+	try:
+		if target.exists():
+			target.unlink()
+		out.to_csv(target, index=False, encoding='utf-8')
+		st.success(f"CSV guardado en {target}")
+	except Exception as e:
+		st.error(f"Error guardando inventario_real.csv: {e}")
+
+
+def convert_bulk_xls():
+	bulk_dir = Path('ficheros_a_convertir_bulk')
+	if not bulk_dir.exists():
+		st.error(f"No existe la carpeta {bulk_dir}")
+		return
+	files = list(bulk_dir.glob('*.xls')) + list(bulk_dir.glob('*.xlsx'))
+	if not files:
+		st.info(f"No se han encontrado ficheros .xls/.xlsx en {bulk_dir}")
+		return
+	results = []
+	from datetime import timedelta
+	def second_thursday_from(d):
+		delta = (3 - d.weekday()) % 7
+		first = d + timedelta(days=delta)
+		second = first + timedelta(days=7)
+		return second
+	from scripts.parser import _read_excel_fallback
+	for file in files:
+		try:
+			date, table = parse_xls(file)
+		except Exception as e:
+			results.append((file.name, 'ERROR', str(e)))
+			continue
+		if date is None:
+			results.append((file.name, 'NO_DATE', 'No se encontró fecha interna'))
+			continue
+		if table is None or table.empty:
+			results.append((file.name, 'NO_PRODUCTS', 'No se extrajeron líneas de producto'))
+			continue
+		raw_df = None
+		try:
+			raw_df = _read_excel_fallback(file)
+		except Exception:
+			raw_df = None
+		# extract dates
+		def _extract_all_dates(df):
+			import re
+			from datetime import datetime
+			if df is None:
+				return []
+			res = []
+			def norm(s):
+				try:
+					return re.sub(r'\s+', ' ', str(s)).strip()
+				except Exception:
+					return ''
+			patterns = [re.compile(r'(\d{1,2}/\d{1,2}/\d{4}\s*\d{1,2}:\d{2}:\d{2})'), re.compile(r'(\d{1,2}/\d{1,2}/\d{4})')]
+			rows, cols = df.shape
+			for r in range(rows):
+				for c in range(cols):
+					cell = norm(df.iat[r, c])
+					if not cell:
+						continue
+					for p in patterns:
+						m = p.search(cell)
+						if m:
+							found = m.group(1)
+							for fmt in ('%d/%m/%Y %H:%M:%S', '%d/%m/%Y'):
+								try:
+									res.append(datetime.strptime(found, fmt))
+									break
+								except Exception:
+									continue
+			for r in range(rows):
+				for c in range(cols):
+					cell = norm(df.iat[r, c]).strip("'\"")
+					if 'fecha de grabaci' in cell.lower():
+						for c2 in range(c+1, min(cols, c+6)):
+							v = df.iat[r, c2]
+							if v is None or (isinstance(v, float) and pd.isna(v)):
+								continue
+							try:
+								if isinstance(v, (int, float)):
+									dt = pd.to_datetime(v, unit='d', origin='1899-12-30', errors='coerce')
+									if not pd.isna(dt):
+										res.append(dt.to_pydatetime())
+									continue
+							except Exception:
+								pass
+							s2 = norm(v).strip("'\"")
+							for fmt in ('%d/%m/%Y %H:%M:%S', '%d/%m/%Y', '%Y-%m-%d %H:%M:%S'):
+								try:
+									res.append(datetime.strptime(s2, fmt))
+									break
+								except Exception:
+									continue
+			seen = set()
+			out = []
+			for d in res:
+				key = d.strftime('%Y-%m-%d %H:%M:%S')
+				if key not in seen:
+					seen.add(key)
+					out.append(d)
+			return out
+		all_dates = _extract_all_dates(raw_df)
+		if len(all_dates) >= 2:
+			base_dt = all_dates[0]
+			end_dt = all_dates[1] - timedelta(days=1)
+			base_name = base_dt.strftime('%d-%m-%y')
+			suffix = end_dt.strftime('%d-%m-%y')
+			fname = f"{base_name}_{suffix}.csv"
+		else:
+			if date is None:
+				results.append((file.name, 'NO_DATE', 'No se encontró fecha interna'))
+				continue
+			base_name = date.strftime('%d-%m-%y')
+			second = second_thursday_from(date)
+			suffix = second.strftime('%d-%m-%y')
+			fname = f"{base_name}_{suffix}.csv"
+		cons_col = None
+		for cand in ['Col_10', 'Col_9', 'Col_11', 'Col_8', 'Col_12']:
+			if cand in table.columns:
+				cons_col = cand
+				break
+		if cons_col is None:
+			for coln in table.columns:
+				if coln not in ('Codigo', 'Articulo', 'Unidad_de_Medida'):
+					cons_col = coln
+					break
+		if cons_col is None:
+			results.append((file.name, 'NO_CONS_COL', 'No se localizó columna Consumo'))
+			continue
+		save_df = table[['Codigo', 'Articulo', 'Unidad_de_Medida', cons_col]].rename(columns={cons_col: 'Consumo'})
+		target = Path('consumo_teorico') / fname
+		try:
+			target.parent.mkdir(parents=True, exist_ok=True)
+			if target.exists():
+				target.unlink()
+			save_df.to_csv(target, index=False, encoding='utf-8')
+			results.append((file.name, 'SAVED', fname))
+		except Exception as e:
+			results.append((file.name, 'ERROR_SAVE', str(e)))
+	st.markdown('### Resultados de la conversión bulk')
+	for r in results:
+		st.write(f"- {r[0]}: {r[1]} {r[2] if len(r) > 2 else ''}")
 def _load_items_from_folder(folder: Path):
 	out_rows = []
 	if not folder.exists():
@@ -392,6 +613,173 @@ def render_saved_results(res):
 		st.markdown('### Inventario actual guardado')
 		st.dataframe(df_inv)
 
+	# --- Conversion functions (so they can be triggered programmatically)
+	def convert_all_xls():
+		src_dir = Path("ficheros_a_convertir")
+		dst_dir = Path("consumo_teorico")
+		dst_dir.mkdir(parents=True, exist_ok=True)
+
+		if not src_dir.exists():
+			st.error(f"No existe la carpeta {src_dir}")
+			return
+		files = list(src_dir.glob('*.xls')) + list(src_dir.glob('*.xlsx'))
+		if not files:
+			st.info("No se han encontrado ficheros .xls/.xlsx en ficheros_a_convertir")
+			return
+
+		results = []
+		for file in files:
+			try:
+				date, table = parse_xls(file)
+			except Exception as e:
+				results.append((file.name, 'ERROR', str(e)))
+				continue
+
+			if date is None:
+				results.append((file.name, 'NO_DATE', 'No se encontró fecha interna'))
+				continue
+			if table is None or table.empty:
+				results.append((file.name, 'NO_PRODUCTS', 'No se extrajeron líneas de producto'))
+				continue
+
+			# select consumption column
+			cons_col = None
+			for cand in ['Col_10', 'Col_9', 'Col_11', 'Col_8', 'Col_12']:
+				if cand in table.columns:
+					cons_col = cand
+					break
+			if cons_col is None:
+				for coln in table.columns:
+					if coln not in ('Codigo', 'Articulo', 'Unidad_de_Medida'):
+						cons_col = coln
+						break
+
+			if cons_col is None:
+				results.append((file.name, 'NO_CONS_COL', 'No se localizó columna Consumo'))
+				continue
+
+			save_df = table[['Codigo', 'Articulo', 'Unidad_de_Medida', cons_col]].rename(columns={cons_col: 'Consumo'})
+			fname = date.strftime('%d-%m-%y') + '.csv'
+			target = dst_dir / fname
+			try:
+				if target.exists():
+					target.unlink()
+				save_df.to_csv(target, index=False, encoding='utf-8')
+				results.append((file.name, 'SAVED', fname))
+			except Exception as e:
+				results.append((file.name, 'ERROR_SAVE', str(e)))
+
+		st.markdown('### Resultados de la conversión en lote')
+		for r in results:
+			st.write(f"- {r[0]}: {r[1]} {r[2] if len(r) > 2 else ''}")
+
+
+	def convert_inventory_file():
+		file = Path("inventario_actual.xls")
+		if not file.exists():
+			st.error(f"No se encontró el fichero {file}. Debe situarse en la raíz del proyecto.")
+			return
+		st.write(f"Procesando: {file.name}")
+		try:
+			date, table = parse_xls(file)
+		except Exception as e:
+			st.error(f"Error leyendo {file.name}: {e}")
+			table = None
+			date = None
+
+		title = date.strftime('%d/%m/%Y %H:%M:%S') if date else file.name
+
+		if table is None or table.empty:
+			st.warning("No se han extraído líneas de producto según el patrón especificado.")
+			return
+		dest_dir = Path('inventario_actual')
+		dest_dir.mkdir(parents=True, exist_ok=True)
+		if 'Col_16' not in table.columns:
+			st.error('No se encontró la columna Col_16 necesaria para "Real".')
+			return
+		out = table[['Codigo', 'Articulo', 'Unidad_de_Medida', 'Col_16']].rename(columns={'Col_16': 'Real'})
+		target = dest_dir / 'inventario_real.csv'
+		try:
+			if target.exists():
+				target.unlink()
+			out.to_csv(target, index=False, encoding='utf-8')
+			st.success(f"CSV guardado en {target}")
+		except Exception as e:
+			st.error(f"Error guardando inventario_real.csv: {e}")
+
+
+	def convert_bulk_xls():
+		bulk_dir = Path('ficheros_a_convertir_bulk')
+		if not bulk_dir.exists():
+			st.error(f"No existe la carpeta {bulk_dir}")
+			return
+		files = list(bulk_dir.glob('*.xls')) + list(bulk_dir.glob('*.xlsx'))
+		if not files:
+			st.info(f"No se han encontrado ficheros .xls/.xlsx en {bulk_dir}")
+			return
+
+		results = []
+		from datetime import timedelta
+
+		def second_thursday_from(d):
+			delta = (3 - d.weekday()) % 7
+			first = d + timedelta(days=delta)
+			second = first + timedelta(days=7)
+			return second
+
+		for file in files:
+			try:
+				date, table = parse_xls(file)
+			except Exception as e:
+				results.append((file.name, 'ERROR', str(e)))
+				continue
+
+			if date is None:
+				results.append((file.name, 'NO_DATE', 'No se encontró fecha interna'))
+				continue
+			if table is None or table.empty:
+				results.append((file.name, 'NO_PRODUCTS', 'No se extrajeron líneas de producto'))
+				continue
+
+			# determine second thursday based on date
+			try:
+				second = second_thursday_from(date)
+				# use second-1 day as suffix date range end as previous logic
+				suffix = (second - timedelta(days=1)).strftime('%d-%m-%y')
+			except Exception:
+				suffix = date.strftime('%d-%m-%y')
+
+			# save logic: reuse parse_xls output by attempting to find cons column
+			cons_col = None
+			for cand in ['Col_10', 'Col_9', 'Col_11', 'Col_8', 'Col_12']:
+				if cand in table.columns:
+					cons_col = cand
+					break
+			if cons_col is None:
+				for coln in table.columns:
+					if coln not in ('Codigo', 'Articulo', 'Unidad_de_Medida'):
+						cons_col = coln
+						break
+			if cons_col is None:
+				results.append((file.name, 'NO_CONS_COL', 'No se localizó columna Consumo'))
+				continue
+
+			save_df = table[['Codigo', 'Articulo', 'Unidad_de_Medida', cons_col]].rename(columns={cons_col: 'Consumo'})
+			fname = date.strftime('%d-%m-%y') + '_' + suffix + '.csv'
+			target = Path('consumo_teorico') / fname
+			try:
+				target.parent.mkdir(parents=True, exist_ok=True)
+				if target.exists():
+					target.unlink()
+				save_df.to_csv(target, index=False, encoding='utf-8')
+				results.append((file.name, 'SAVED', fname))
+			except Exception as e:
+				results.append((file.name, 'ERROR_SAVE', str(e)))
+
+		st.markdown('### Resultados de la conversión bulk')
+		for r in results:
+			st.write(f"- {r[0]}: {r[1]} {r[2] if len(r) > 2 else ''}")
+
 # Sidebar: botón para convertir todos los .xls/.xlsx en `ficheros_a_convertir`
 src_dir = Path("ficheros_a_convertir")
 dst_dir = Path("consumo_teorico")
@@ -400,7 +788,7 @@ dst_dir.mkdir(parents=True, exist_ok=True)
 # carpeta bulk (nombres con sufijo segundo jueves)
 bulk_dir = Path("ficheros_a_convertir_bulk")
 
-if st.sidebar.button("Convertir todos los XLS"):
+if SHOW_CONV_BUTTONS and st.sidebar.button("Convertir todos los XLS"):
 	if not src_dir.exists():
 		st.error(f"No existe la carpeta {src_dir}")
 	else:
@@ -455,7 +843,7 @@ if st.sidebar.button("Convertir todos los XLS"):
 				st.write(f"- {r[0]}: {r[1]} {r[2] if len(r) > 2 else ''}")
 
 # Botón para convertir/procesar inventario actual (junto a los botones de conversión)
-if st.sidebar.button("Convertir inventario actual"):
+if SHOW_CONV_BUTTONS and st.sidebar.button("Convertir inventario actual"):
 	file = Path("inventario_actual.xls")
 	if not file.exists():
 		st.error(f"No se encontró el fichero {file}. Debe situarse en la raíz del proyecto.")
@@ -491,7 +879,7 @@ if st.sidebar.button("Convertir inventario actual"):
  
 
 # --- Botón para convertir ficheros desde la carpeta bulk y añadir sufijo segundo jueves
-if bulk_dir.exists() and st.sidebar.button("Convertir bulk XLS (añadir segundo jueves)"):
+if bulk_dir.exists() and SHOW_CONV_BUTTONS and st.sidebar.button("Convertir bulk XLS (añadir segundo jueves)"):
 	files = list(bulk_dir.glob('*.xls')) + list(bulk_dir.glob('*.xlsx'))
 	if not files:
 		st.info(f"No se han encontrado ficheros .xls/.xlsx en {bulk_dir}")
@@ -640,28 +1028,33 @@ if bulk_dir.exists() and st.sidebar.button("Convertir bulk XLS (añadir segundo 
 
 		st.markdown('### Resultados de la conversión bulk')
 		for r in results:
-			st.write(f"- {r[0]}: {r[1]} {r[2] if len(r) > 2 else ''}")
-
-st.sidebar.markdown("---")
+			st.write(f"- {r[0]}: {r[1]} {r[2] if len(r) > 2 else ''}") 
 
 # --- Uploaders en la barra lateral
-st.sidebar.markdown('### Subir ficheros (.xls/.xlsx)')
+st.sidebar.markdown('### Pasos a seguir:')
 
 # 1) Inventario actual (un único fichero). Se guarda siempre como inventario_actual.xls
-inv_upload = st.sidebar.file_uploader("1) Subir inventario actual (se guardará como inventario_actual.xls)", type=['xls', 'xlsx'], accept_multiple_files=False, key='inv_uploader')
+st.sidebar.markdown("<div style='display:flex;align-items:center;margin-bottom:6px'><span style='display:inline-block;width:30px;height:30px;line-height:30px;text-align:center;border-radius:6px;background:#ffd966;color:#2b2b2b;font-weight:700;margin-right:8px;font-size:16px'>1</span><span style='font-weight:700;font-size:15px'>Subir inventario actual</span></div>", unsafe_allow_html=True)
+inv_upload = st.sidebar.file_uploader("Subir inventario actual", type=['xls', 'xlsx'], accept_multiple_files=False, key='inv_uploader')
 if inv_upload is not None:
 	try:
 		target = Path('inventario_actual.xls')
 		with open(target, 'wb') as fh:
 			fh.write(inv_upload.getvalue())
 		st.sidebar.success(f"Inventario guardado como {target.name}")
+		# ejecutar conversión automática del inventario subido
+		try:
+			convert_inventory_file()
+		except Exception as e:
+			st.sidebar.error(f"Error al convertir inventario automáticamente: {e}")
 	except Exception as e:
 		st.sidebar.error(f"Error guardando inventario: {e}")
 
 # 2) Ficheros consumo días sueltos -> carpeta ficheros_a_convertir (múltiples)
+st.sidebar.markdown("<div style='display:flex;align-items:center;margin-bottom:6px'><span style='display:inline-block;width:30px;height:30px;line-height:30px;text-align:center;border-radius:6px;background:#8fc3ff;color:#062a4d;font-weight:700;margin-right:8px;font-size:16px'>2</span><span style='font-weight:700;font-size:15px'>Subir consumo de días sueltos</span></div>", unsafe_allow_html=True)
 src_dir = Path('ficheros_a_convertir')
 src_dir.mkdir(parents=True, exist_ok=True)
-cons_uploads = st.sidebar.file_uploader("2) Subir ficheros consumo (días sueltos) - varios permitidos", type=['xls', 'xlsx'], accept_multiple_files=True, key='cons_uploader')
+cons_uploads = st.sidebar.file_uploader("2) Subir ficheros consumo (días sueltos)", type=['xls', 'xlsx'], accept_multiple_files=True, key='cons_uploader')
 if cons_uploads:
 	saved = []
 	for up in cons_uploads:
@@ -675,11 +1068,17 @@ if cons_uploads:
 			st.sidebar.error(f"Error guardando {up.name}: {e}")
 	if saved:
 		st.sidebar.success(f"Guardados en ficheros_a_convertir: {', '.join(saved)}")
+		# ejecutar conversión automática de los ficheros subidos
+		try:
+			convert_all_xls()
+		except Exception as e:
+			st.sidebar.error(f"Error al convertir ficheros_a_convertir automáticamente: {e}")
 
 # 3) Ficheros consumo bulk -> carpeta ficheros_a_convertir_bulk (múltiples)
+st.sidebar.markdown("<div style='display:flex;align-items:center;margin-bottom:6px'><span style='display:inline-block;width:30px;height:30px;line-height:30px;text-align:center;border-radius:6px;background:#b6e7a9;color:#274117;font-weight:700;margin-right:8px;font-size:16px'>3</span><span style='font-weight:700;font-size:15px'>Subir consumo de varios días a la vez</span></div>", unsafe_allow_html=True)
 bulk_dir = Path('ficheros_a_convertir_bulk')
 bulk_dir.mkdir(parents=True, exist_ok=True)
-bulk_uploads = st.sidebar.file_uploader("3) Subir ficheros consumo bulk - varios permitidos", type=['xls', 'xlsx'], accept_multiple_files=True, key='bulk_uploader')
+bulk_uploads = st.sidebar.file_uploader("Subir ficheros consumo (varios días seguidos en un mismo fichero)", type=['xls', 'xlsx'], accept_multiple_files=True, key='bulk_uploader')
 if bulk_uploads:
 	saved_b = []
 	for up in bulk_uploads:
@@ -693,14 +1092,22 @@ if bulk_uploads:
 			st.sidebar.error(f"Error guardando {up.name}: {e}")
 	if saved_b:
 		st.sidebar.success(f"Guardados en ficheros_a_convertir_bulk: {', '.join(saved_b)}")
+		# ejecutar conversión automática de bulk
+		try:
+			convert_bulk_xls()
+		except Exception as e:
+			st.sidebar.error(f"Error al convertir bulk automáticamente: {e}")
+st.sidebar.markdown("<div style='display:flex;align-items:center;margin-bottom:6px'><span style='display:inline-block;width:55px;height:30px;line-height:30px;text-align:center;border-radius:6px;background:#ffb3b3;color:#4a1f1f;font-weight:700;margin-right:8px;font-size:16px'>4</span><span style='font-weight:700;font-size:15px'>Seleccionar rango de fechas desde el día del pedido hasta el día anterior del segundo camión</span></div>", unsafe_allow_html=True)
+st.sidebar.write("Es decir, si el camión que pido hoy llega el viernes y el siguiente camión llega el siguiente viernes, selecciona desde el día actual hasta el día anterior del segundo camión.")
+st.sidebar.markdown("<div style='display:flex;align-items:center;margin-bottom:6px'><span style='display:inline-block;width:55px;height:30px;line-height:30px;text-align:center;border-radius:6px;background:#d7b3ff;color:#2b004d;font-weight:700;margin-right:8px;font-size:16px'>5</span><span style='font-weight:700;font-size:15px'>Pulsa 'Calcular Pedido' y comprueba la tabla 'Inventario Actual' contiene los datos del SAGA</span></div>", unsafe_allow_html=True)
 # --- Uploaders para ficheros maestros de secciones (congelado, fresco, seco)
 st.sidebar.markdown("---")
-st.sidebar.write("Subir ficheros maestros para las secciones (opcional). Se guardarán en las carpetas `congelado/`, `fresco/`, `seco/`.")
+st.sidebar.write("Subir antiguos pedidos de camión para saber cantidades por paquete/caja.")
 
 # congelado
 congelado_dir = Path('congelado')
 congelado_dir.mkdir(parents=True, exist_ok=True)
-congelado_uploads = st.sidebar.file_uploader("Subir ficheros para 'congelado' - varios permitidos", type=['xls', 'xlsx'], accept_multiple_files=True, key='congelado_uploader')
+congelado_uploads = st.sidebar.file_uploader("Pedido de `congelado`.", type=['xls', 'xlsx'], accept_multiple_files=True, key='congelado_uploader')
 if congelado_uploads:
 	saved_c = []
 	for up in congelado_uploads:
@@ -718,7 +1125,7 @@ if congelado_uploads:
 # fresco
 fresco_dir = Path('fresco')
 fresco_dir.mkdir(parents=True, exist_ok=True)
-fresco_uploads = st.sidebar.file_uploader("Subir ficheros para 'fresco' - varios permitidos", type=['xls', 'xlsx'], accept_multiple_files=True, key='fresco_uploader')
+fresco_uploads = st.sidebar.file_uploader("Pedido de `fresco`.", type=['xls', 'xlsx'], accept_multiple_files=True, key='fresco_uploader')
 if fresco_uploads:
 	saved_f = []
 	for up in fresco_uploads:
@@ -736,7 +1143,7 @@ if fresco_uploads:
 # seco
 seco_dir = Path('seco')
 seco_dir.mkdir(parents=True, exist_ok=True)
-seco_uploads = st.sidebar.file_uploader("Subir ficheros para 'seco' - varios permitidos", type=['xls', 'xlsx'], accept_multiple_files=True, key='seco_uploader')
+seco_uploads = st.sidebar.file_uploader("Pedido de `seco`.", type=['xls', 'xlsx'], accept_multiple_files=True, key='seco_uploader')
 if seco_uploads:
 	saved_s = []
 	for up in seco_uploads:
