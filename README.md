@@ -81,7 +81,7 @@ Controles importantes:
 
 - Nombres de ficheros en `consumo_teorico` pueden ser `DD-MM-YY.csv` o rangos `DD-MM-YY_DD-MM-YY.csv`.
 	Los rangos se interpretan como días consecutivos y se suman las ventas por día.
-- Masas (códigos `BF`, `BM`, `BP`): se añaden 4 días extra de consumo basados en ventas estimadas
+-- Masas (códigos `BF`, `BM`, `BP`) y el topping Mozzarella (`EQ`): se añaden 4 días extra de consumo basados en ventas estimadas
 	si no hubiera consumo directo para esos días; el cálculo reparte la masa necesaria por participación histórica.
 
 ## Ubicación de resultados

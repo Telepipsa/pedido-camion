@@ -500,7 +500,38 @@ def render_saved_results(res):
 				colchon_extra_str = f" ({'+' if sign_pct>0 else ''}{sign_pct}%)"
 	except Exception:
 		colchon_extra_str = ""
-	st.info(f"""**Ajustes aplicados**
+	# Mostrar información de ajustes, incluyendo desglose para masas/topping si procede
+	# Obtener resumen_masas guardado en results
+	summary_masas = res.get('summary_masas')
+	if summary_masas:
+		sales_val = summary_masas.get('sales', 0.0)
+		detail = summary_masas.get('detail', {}) or {}
+		# etiquetas y unidades para códigos conocidos
+		labels = {'BP': 'Bolas pequeñas', 'BM': 'Bolas medianas', 'BF': 'Bolas familiares', 'EQ': 'Topping Mozzarella'}
+		units = {'BP': 'bolas', 'BM': 'bolas', 'BF': 'bolas', 'EQ': 'Kilogramos'}
+		# construir lista de líneas para el desglose
+		detail_lines = []
+		for code, amt in detail.items():
+			try:
+				u = units.get(code, 'unidades')
+				lab = labels.get(code, code)
+				if u.lower() in ('bolas', 'unidades'):
+					val_str = f"+{int(round(float(amt)))} {u}"
+				else:
+					val_str = f"+{round(float(amt), 2):,.2f} {u}"
+			except Exception:
+				val_str = f"+{amt}"
+			detail_lines.append(f"    - {lab} {val_str}")
+		detail_md = "\n".join(detail_lines)
+		st.info(f"""**Ajustes aplicados**
+
+- Colchon {colchon_base_pct}%{colchon_extra_str}
+- Desperdicio -4%
+- Masas y topping descongelación: 4 días ({sales_val:,.2f} €)
+{detail_md}
+""")
+	else:
+		st.info(f"""**Ajustes aplicados**
 
 	- Colchon {colchon_base_pct}%{colchon_extra_str}
 	- Desperdicio -4%
@@ -1473,8 +1504,9 @@ if st.button("Calcular Pedido"):
 				else:
 					agg = pd.concat(dfs).groupby(['Codigo', 'Articulo', 'Unidad_de_Medida'], as_index=False)['Consumo'].sum()
 
-					# --- Ajuste para masas (BF, BM, BP): añadir 4 días extra al rango solo para estos códigos
-					MASAS = set(['BF', 'BM', 'BP'])
+					# --- Ajuste para masas (BF, BM, BP) y topping Mozzarella (EQ):
+					# añadir 4 días extra al rango solo para estos códigos
+					MASAS = set(['BF', 'BM', 'BP', 'EQ'])
 					extra_days = 4
 					per_product_extra_days = extra_days
 					from datetime import timedelta as _td
@@ -1583,7 +1615,8 @@ if st.button("Calcular Pedido"):
 							'total_days': masas_added_days,
 							'per_product_days': per_product_extra_days,
 							'sales': masas_added_sales,
-							'consumo_added': masas_added_consumption
+							'consumo_added': masas_added_consumption,
+							'detail': masas_added_detail
 						}
 					# Intentar leer inventario guardado
 					inv_path = Path('inventario_actual') / 'inventario_real.csv'
