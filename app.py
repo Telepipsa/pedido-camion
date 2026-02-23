@@ -1,6 +1,7 @@
 # Aplicación Streamlit inicial con botón de extracción de tabla desde XLS
 import streamlit as st
 import pandas as pd
+import math
 from pathlib import Path
 
 from scripts.parser import parse_xls
@@ -490,6 +491,9 @@ def render_saved_results(res):
 	# Mostrar ajustes aplicados y, si procede, el +/- aplicado al colchón
 	colchon_base_pct = 20
 	colchon_extra_str = ""
+	# --- Códigos Pepsi para colchón extra
+	pepsi_codigos = {"PSPR1", "PSPR3", "PSPR5", "PSPZ1", "PSPZ5"}
+	colchon_pepsi_pct = 10
 	try:
 		total_for_summary = summary.get('total', 0) if summary else 0
 		chosen_sales_for_summary = res.get('chosen_sales_total', 0)
@@ -500,6 +504,24 @@ def render_saved_results(res):
 				colchon_extra_str = f" ({'+' if sign_pct>0 else ''}{sign_pct}%)"
 	except Exception:
 		colchon_extra_str = ""
+
+	# --- Ajustar colchón para Pepsi en la tabla de pedido
+	order_df = res.get('order_df')
+	if order_df is not None and 'Codigo' in order_df.columns and 'Cantidad_a_pedir' in order_df.columns:
+		# Normalizar códigos
+		order_df['__COD__'] = order_df['Codigo'].astype(str).str.strip().str.upper().str.replace(' ', '')
+		mask_pepsi = order_df['__COD__'].isin(pepsi_codigos)
+		# Aplicar colchón extra solo a Pepsi y redondear hacia arriba a entero
+		try:
+			vals = pd.to_numeric(order_df.loc[mask_pepsi, 'Cantidad_a_pedir'], errors='coerce').fillna(0).astype(float)
+			vals = vals * (1 + (colchon_pepsi_pct / 100))
+			# redondear hacia arriba (ceiling) y convertir a int
+			order_df.loc[mask_pepsi, 'Cantidad_a_pedir'] = vals.apply(lambda x: int(math.ceil(x)))
+		except Exception:
+			# si hay problema, dejar los valores originales sin modificar
+			pass
+		# Eliminar columna auxiliar si existe
+		order_df.drop(columns=['__COD__'], inplace=True, errors='ignore')
 	# Mostrar información de ajustes, incluyendo desglose para masas/topping si procede
 	# Obtener resumen_masas guardado en results
 	summary_masas = res.get('summary_masas')
@@ -510,6 +532,7 @@ def render_saved_results(res):
 		labels = {'BP': 'Bolas pequeñas', 'BM': 'Bolas medianas', 'BF': 'Bolas familiares', 'EQ': 'Topping Mozzarella'}
 		units = {'BP': 'bolas', 'BM': 'bolas', 'BF': 'bolas', 'EQ': 'Kilogramos'}
 		# construir lista de líneas para el desglose
+		# construir lista de líneas para el desglose (sin guiones iniciales)
 		detail_lines = []
 		for code, amt in detail.items():
 			try:
@@ -521,21 +544,32 @@ def render_saved_results(res):
 					val_str = f"+{round(float(amt), 2):,.2f} {u}"
 			except Exception:
 				val_str = f"+{amt}"
-			detail_lines.append(f"    - {lab} {val_str}")
-		detail_md = "\n".join(detail_lines)
-		st.info(f"""**Ajustes aplicados**
-
-- Colchon {colchon_base_pct}%{colchon_extra_str}
-- Desperdicio -4%
-- Masas y topping descongelación: 4 días ({sales_val:,.2f} €)
-{detail_md}
-""")
+			detail_lines.append(f"{lab} {val_str}")
+		# construir el texto de ajustes con las líneas de detalle como sub-lista indentada
+		info_lines = [
+			"**Ajustes aplicados**",
+			"",
+			f"- Colchon {colchon_base_pct}%{colchon_extra_str}",
+			"- Se le añade un 10% extra de colchon a las Pepsis de cualquier formato",
+			"- Desperdicio -4%",
+			f"- Masas y topping descongelación: 4 días ({sales_val:,.2f} €)",
+		]
+		# añadir detalle como sub-items (dos espacios para anidar)
+		for dl in detail_lines:
+			info_lines.append(f"  - {dl}")
+		info_text = "\n".join(info_lines)
+		st.info(info_text)
 	else:
-		st.info(f"""**Ajustes aplicados**
-
-	- Colchon {colchon_base_pct}%{colchon_extra_str}
-	- Desperdicio -4%
-	- Masas descongelación: 4 días""")
+		# caso sin detalle: mostrar ajustes con la línea indicando el colchón extra para Pepsis
+		info_lines = [
+			"**Ajustes aplicados**",
+			"",
+			f"- Colchon {colchon_base_pct}%{colchon_extra_str}",
+			"- Se le añade un 10% extra de colchon a las Pepsis de cualquier formato",
+			"- Desperdicio -4%",
+			"- Masas descongelación: 4 días",
+		]
+		st.info("\n".join(info_lines))
 	order_df = res.get('order_df')
 	if order_df is None:
 		st.info('No hay tabla `Cantidad a pedir` disponible.')
@@ -635,14 +669,66 @@ def render_saved_results(res):
 		st.dataframe(df_disp)
 
 	agg = res.get('agg')
-	if agg is not None:
-		st.markdown('### Consumo agregado (archivos seleccionados)')
-		st.dataframe(agg)
-
 	df_inv = res.get('df_inv')
-	if df_inv is not None:
-		st.markdown('### Inventario actual guardado')
-		st.dataframe(df_inv)
+
+	# Mostrar tabla combinada: Codigo, Articulo, Unidad_de_Medida, Real, Consumo
+	try:
+		df_agg = None
+		df_inv2 = None
+		if agg is not None:
+			df_agg = agg.copy() if hasattr(agg, 'copy') else pd.DataFrame(agg)
+		if df_inv is not None:
+			df_inv2 = df_inv.copy() if hasattr(df_inv, 'copy') else pd.DataFrame(df_inv)
+
+		# Normalizar y asegurar columnas
+		if df_agg is None or df_agg.empty:
+			df_agg = pd.DataFrame(columns=['Codigo', 'Articulo', 'Unidad_de_Medida', 'Consumo'])
+		if df_inv2 is None or df_inv2.empty:
+			df_inv2 = pd.DataFrame(columns=['Codigo', 'Articulo', 'Unidad_de_Medida', 'Real'])
+
+		for d in (df_agg, df_inv2):
+			if 'Codigo' in d.columns:
+				d['Codigo'] = d['Codigo'].astype(str).str.strip().str.upper().str.replace(' ', '')
+
+		# Keep only relevant columns if present
+		cols_agg = [c for c in ['Codigo', 'Articulo', 'Unidad_de_Medida', 'Consumo'] if c in df_agg.columns]
+		cols_inv = [c for c in ['Codigo', 'Articulo', 'Unidad_de_Medida', 'Real'] if c in df_inv2.columns]
+
+		merged = pd.merge(df_agg[cols_agg], df_inv2[cols_inv], on='Codigo', how='outer', suffixes=('_consumo', '_inv'))
+
+		# Prefer inventory article/medida when available
+		merged['Articulo'] = merged.get('Articulo_inv').fillna(merged.get('Articulo_consumo'))
+		merged['Unidad_de_Medida'] = merged.get('Unidad_de_Medida_inv').fillna(merged.get('Unidad_de_Medida_consumo'))
+
+		# Ensure Real and Consumo columns exist
+		if 'Real' not in merged.columns and 'Real' in df_inv2.columns:
+			merged['Real'] = merged.get('Real')
+		if 'Consumo' not in merged.columns and 'Consumo' in df_agg.columns:
+			merged['Consumo'] = merged.get('Consumo')
+
+		final_cols = ['Codigo', 'Articulo', 'Unidad_de_Medida']
+		if 'Real' in merged.columns:
+			final_cols.append('Real')
+		else:
+			merged['Real'] = None
+			final_cols.append('Real')
+		if 'Consumo' in merged.columns:
+			final_cols.append('Consumo')
+		else:
+			merged['Consumo'] = None
+			final_cols.append('Consumo')
+
+		final = merged[final_cols]
+		st.markdown('### Consumo e Inventario combinado')
+		st.dataframe(final)
+	except Exception:
+		# Fallback: mostrar por separado si algo falla
+		if agg is not None:
+			st.markdown('### Consumo agregado (archivos seleccionados)')
+			st.dataframe(agg)
+		if df_inv is not None:
+			st.markdown('### Inventario actual guardado')
+			st.dataframe(df_inv)
 
 	# --- Conversion functions (so they can be triggered programmatically)
 	def convert_all_xls():
@@ -1132,6 +1218,42 @@ st.sidebar.markdown("<div style='display:flex;align-items:center;margin-bottom:6
 st.sidebar.write("Es decir, si el camión que pido hoy llega el viernes y el siguiente camión llega el siguiente viernes, selecciona desde el día actual hasta el día anterior del segundo camión.")
 st.sidebar.markdown("<div style='display:flex;align-items:center;margin-bottom:6px'><span style='display:inline-block;width:30px;min-width:30px;height:30px;line-height:30px;text-align:center;border-radius:6px;background:#d7b3ff;color:#2b004d;font-weight:700;margin-right:8px;font-size:16px'>5</span><span style='font-weight:700;font-size:15px'>Pulsa 'Calcular Pedido' y comprueba la tabla 'Inventario Actual' contiene los datos del SAGA</span></div>", unsafe_allow_html=True)
 # --- Uploaders para ficheros maestros de secciones (congelado, fresco, seco)
+st.sidebar.markdown("---")
+# --- Controls for venta_estimada: download and upload
+venta_dir = Path('venta_estimada')
+venta_dir.mkdir(parents=True, exist_ok=True)
+venta_files = sorted([p.name for p in venta_dir.glob('*.csv')])
+if venta_files:
+	sel_file = st.sidebar.selectbox('Seleccionar archivo de venta_estimada', venta_files, key='venta_estimada_select')
+	sel_path = venta_dir / sel_file
+	try:
+		with open(sel_path, 'rb') as fh:
+			file_bytes = fh.read()
+		st.sidebar.download_button('Descargar archivo de venta_estimada', file_bytes, file_name=sel_file, mime='text/csv')
+	except Exception:
+		st.sidebar.warning('No se pudo leer el archivo para descargar.')
+
+	up = st.sidebar.file_uploader('Subir/Actualizar archivo de venta_estimada (reemplaza el seleccionado)', type=['csv'], accept_multiple_files=False, key='venta_estimada_uploader')
+	if up:
+		try:
+			target = venta_dir / up.name
+			with open(target, 'wb') as fh:
+				fh.write(up.getvalue())
+			st.sidebar.success(f"Guardado {up.name} en venta_estimada/")
+			# refresh list in session (simple approach: reload page needed to see reflected in selector)
+		except Exception as e:
+			st.sidebar.error(f"Error guardando archivo: {e}")
+else:
+	st.sidebar.info('No hay ficheros en la carpeta venta_estimada. Puedes subir uno a continuación:')
+	up_new = st.sidebar.file_uploader('Subir venta_estimada (CSV)', type=['csv'], accept_multiple_files=False, key='venta_estimada_uploader_new')
+	if up_new:
+		try:
+			target = venta_dir / up_new.name
+			with open(target, 'wb') as fh:
+				fh.write(up_new.getvalue())
+			st.sidebar.success(f"Guardado {up_new.name} en venta_estimada/")
+		except Exception as e:
+			st.sidebar.error(f"Error guardando archivo: {e}")
 st.sidebar.markdown("---")
 st.sidebar.write("Subir antiguos pedidos de camión para saber cantidades por paquete/caja.")
 
