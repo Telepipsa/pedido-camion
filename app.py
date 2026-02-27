@@ -527,6 +527,11 @@ def render_saved_results(res):
 	summary_masas = res.get('summary_masas')
 	if summary_masas:
 		sales_val = summary_masas.get('sales', 0.0)
+		sales_masas_val = summary_masas.get('sales_masas', sales_val)
+		sales_topping_val = summary_masas.get('sales_topping', 0.0)
+		har_days = int(summary_masas.get('har_days', 0) or 0)
+		har_sales_val = float(summary_masas.get('har_sales', 0.0) or 0.0)
+		har_consumo_added = float(summary_masas.get('har_consumo_added', 0.0) or 0.0)
 		detail = summary_masas.get('detail', {}) or {}
 		# etiquetas y unidades para códigos conocidos
 		labels = {'BP': 'Bolas pequeñas', 'BM': 'Bolas medianas', 'BF': 'Bolas familiares', 'EQ': 'Topping Mozzarella'}
@@ -552,8 +557,12 @@ def render_saved_results(res):
 			f"- Colchon {colchon_base_pct}%{colchon_extra_str}",
 			"- Se le añade un 10% extra de colchon a las Pepsis de cualquier formato",
 			"- Desperdicio -4%",
-			f"- Masas y topping descongelación: 4 días ({sales_val:,.2f} €)",
+			f"- Topping Mozzarella en descongelación: 2 días ({sales_topping_val:,.2f} €)",
+			f"- Masas en descongelación: 4 días ({sales_masas_val:,.2f} €)",
+			f"- Harina: +{har_days} días de consumo ({har_sales_val:,.2f} €)",
+			"- Consumo extra",
 		]
+		info_lines.append(f"  - Harina: +{har_consumo_added:,.2f} Kilogramos")
 		# añadir detalle como sub-items (dos espacios para anidar)
 		for dl in detail_lines:
 			info_lines.append(f"  - {dl}")
@@ -568,6 +577,8 @@ def render_saved_results(res):
 			"- Se le añade un 10% extra de colchon a las Pepsis de cualquier formato",
 			"- Desperdicio -4%",
 			"- Masas descongelación: 4 días",
+			"- Topping Mozzarella descongelación: 2 días",
+			"- Semola de roble (HAR): +3 días de consumo",
 		]
 		st.info("\n".join(info_lines))
 	order_df = res.get('order_df')
@@ -612,14 +623,34 @@ def render_saved_results(res):
 				show_upe = st.checkbox("Mostrar 'Unidades_por_embalaje' en tablas (congelado/fresco/seco)", value=False, key='show_upe')
 				def _compute_embalajes(df):
 					import math
+					import re
 					if 'Cantidad_a_pedir' not in df.columns:
 						return df
 					# asegurar columna Unidades_por_embalaje si no existe
 					if 'Unidades_por_embalaje' not in df.columns:
 						df['Unidades_por_embalaje'] = None
+					def _nearest_multiple(q, base):
+						try:
+							f = float(q)
+						except Exception:
+							return None
+						if base <= 0:
+							return None
+						return int(base * math.floor((f / base) + 0.5))
 					def _calc(row):
 						try:
 							q = float(row['Cantidad_a_pedir'])
+							code = str(row.get('Codigo', '')).strip().upper()
+							art = str(row.get('Articulo', '')).upper()
+							if code == 'BF' or ('BOLA FAMILIAR' in art):
+								rounded_q = _nearest_multiple(q, 30)
+								return rounded_q
+							if code == 'BM' or ('BOLA MEDIANA' in art):
+								rounded_q = _nearest_multiple(q, 45)
+								return rounded_q
+							if code == 'BP' or bool(re.search(r'BOLA\s+PEQUE.?A', art)):
+								rounded_q = _nearest_multiple(q, 50)
+								return rounded_q
 							upe = row['Unidades_por_embalaje']
 							if pd.isna(upe) or upe is None:
 								return None
@@ -1627,9 +1658,10 @@ if st.button("Calcular Pedido"):
 					agg = pd.concat(dfs).groupby(['Codigo', 'Articulo', 'Unidad_de_Medida'], as_index=False)['Consumo'].sum()
 
 					# --- Ajuste para masas (BF, BM, BP) y topping Mozzarella (EQ):
-					# añadir 4 días extra al rango solo para estos códigos
-					MASAS = set(['BF', 'BM', 'BP', 'EQ'])
-					extra_days = 4
+					# masas: 4 días extra, topping EQ: 2 días extra
+					EXTRA_DAYS_BY_CODE = {'BF': 4, 'BM': 4, 'BP': 4, 'EQ': 2}
+					MASAS = set(EXTRA_DAYS_BY_CODE.keys())
+					extra_days = max(EXTRA_DAYS_BY_CODE.values())
 					per_product_extra_days = extra_days
 					from datetime import timedelta as _td
 					extra_start = end_sel + _td(days=1)
@@ -1691,11 +1723,18 @@ if st.button("Calcular Pedido"):
 					# ensure agg has Codigo as string
 					agg['Codigo'] = agg['Codigo'].astype(str)
 
-					# Recalcular usando solo venta estimada de los 4 días siguientes
-					ests_extra_total = 0.0
-					for d in extra_dates:
-						if d in ests_map:
-							ests_extra_total += float(ests_map[d])
+					# Recalcular usando venta estimada de los días extra según código
+					# (para resumen: masas = 4 días una sola vez, topping EQ = 2 días)
+					ests_extra_total_by_code = {}
+					for code, code_days in EXTRA_DAYS_BY_CODE.items():
+						code_total = 0.0
+						for d in extra_dates[:code_days]:
+							if d in ests_map:
+								code_total += float(ests_map[d])
+						ests_extra_total_by_code[code] = code_total
+					ests_extra_masas = float(ests_extra_total_by_code.get('BF', 0.0))
+					ests_extra_topping = float(ests_extra_total_by_code.get('EQ', 0.0))
+					ests_extra_total = ests_extra_masas + ests_extra_topping
 
 					# masa consumo actual (antes de añadir extras)
 					masa_current_total = agg.loc[agg['Codigo'].isin(MASAS)]['Consumo'].sum()
@@ -1705,10 +1744,7 @@ if st.button("Calcular Pedido"):
 					else:
 						masa_per_euro = 0.0
 
-					# masa necesaria para los días extra según venta estimada
-					masa_needed_total = ests_extra_total * masa_per_euro
-
-					# distribuir masa_needed_total entre códigos según su participación actual, o igual si 0
+					# distribuir consumo extra por código según su participación actual
 					if masa_current_total > 0:
 						shares = {}
 						masas_added_detail = {}
@@ -1717,9 +1753,11 @@ if st.button("Calcular Pedido"):
 							shares[code] = cval / masa_current_total
 					else:
 						shares = {code: 1.0/len(MASAS) for code in MASAS}
+						masas_added_detail = {}
 
 					for code in MASAS:
-						added = masa_needed_total * shares.get(code, 0)
+						code_per_euro = masa_per_euro * shares.get(code, 0)
+						added = ests_extra_total_by_code.get(code, 0.0) * code_per_euro
 						if any(agg['Codigo'] == code):
 							agg.loc[agg['Codigo'] == code, 'Consumo'] += added
 						else:
@@ -1730,6 +1768,41 @@ if st.button("Calcular Pedido"):
 					masas_added_days = per_product_extra_days
 					masas_added_sales = ests_extra_total
 
+					# --- Ajuste adicional para Semola de roble (HAR): +3 días de consumo
+					HAR_CODE = 'HAR'
+					har_days = 3
+					har_sales_extra = 0.0
+					for d in extra_dates[:har_days]:
+						if d in ests_map:
+							har_sales_extra += float(ests_map[d])
+
+					har_mask = agg['Codigo'].astype(str).str.strip().str.upper() == HAR_CODE
+					har_current_total = float(agg.loc[har_mask, 'Consumo'].sum()) if har_mask.any() else 0.0
+					if res['total'] and res['total'] > 0:
+						har_per_euro = har_current_total / float(res['total'])
+					else:
+						har_per_euro = 0.0
+					har_added_consumption = har_sales_extra * har_per_euro
+
+					if har_added_consumption > 0:
+						if har_mask.any():
+							if har_current_total > 0:
+								shares_har = agg.loc[har_mask, 'Consumo'] / har_current_total
+								agg.loc[har_mask, 'Consumo'] = agg.loc[har_mask, 'Consumo'] + (shares_har * har_added_consumption)
+							else:
+								n_har = int(har_mask.sum())
+								agg.loc[har_mask, 'Consumo'] = agg.loc[har_mask, 'Consumo'] + (har_added_consumption / max(1, n_har))
+						else:
+							agg = pd.concat([
+								agg,
+								pd.DataFrame([{
+									'Codigo': HAR_CODE,
+									'Articulo': 'SEMOLA DE ROBLE',
+									'Unidad_de_Medida': 'Kilogramo',
+									'Consumo': har_added_consumption
+								}])
+							], ignore_index=True)
+
 					# notas para el resumen de ventas
 					summary_masas = None
 					if masas_added_days > 0:
@@ -1737,6 +1810,11 @@ if st.button("Calcular Pedido"):
 							'total_days': masas_added_days,
 							'per_product_days': per_product_extra_days,
 							'sales': masas_added_sales,
+							'sales_masas': ests_extra_masas,
+							'sales_topping': ests_extra_topping,
+							'har_days': har_days,
+							'har_sales': har_sales_extra,
+							'har_consumo_added': har_added_consumption,
 							'consumo_added': masas_added_consumption,
 							'detail': masas_added_detail
 						}
