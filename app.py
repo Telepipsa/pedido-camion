@@ -14,6 +14,91 @@ SHOW_CONV_BUTTONS = False
 # Toggle to avoid using files that contain Thursdays when selecting
 avoid_thurs = st.checkbox("Evitar usar ficheros con jueves en su rango (cuando sea posible)", value=False)
 
+# --- Sidebar: gestión de ficheros y caché (elimina archivos permitiendo conservar .gitkeep)
+def _delete_files_in_folder(folder_path, exclude_names=('.gitkeep',)):
+	p = Path(folder_path)
+	deleted = []
+	if not p.exists():
+		return deleted
+	for f in list(p.iterdir()):
+		try:
+			if f.is_file() and f.name not in exclude_names:
+				f.unlink()
+				deleted.append(f.name)
+		except Exception:
+			# ignorar ficheros que no se puedan borrar
+			continue
+	return deleted
+
+with st.sidebar.expander('Gestión ficheros y caché', expanded=False):
+	st.write('Eliminar ficheros para subir nuevas versiones (no se borrarán .gitkeep)')
+	inv_dir = Path('inventario_actual')
+	cons_dir = Path('consumo_teorico')
+	inv_count = 0
+	cons_count = 0
+	if inv_dir.exists():
+		inv_count = sum(1 for f in inv_dir.iterdir() if f.is_file() and f.name != '.gitkeep')
+	if cons_dir.exists():
+		cons_count = sum(1 for f in cons_dir.iterdir() if f.is_file() and f.name != '.gitkeep')
+
+	st.write(f"Ficheros en inventario_actual: {inv_count}")
+	st.write(f"Ficheros en consumo_teorico: {cons_count}")
+
+	# Eliminación inventario_actual
+	confirm_inv = st.checkbox('Confirmar eliminación de inventario_actual', key='confirm_inv')
+	if st.button('Eliminar ficheros inventario_actual', key='btn_del_inv'):
+		if not confirm_inv:
+			st.warning('Marca "Confirmar eliminación de inventario_actual" antes de borrar.')
+		else:
+			deleted = _delete_files_in_folder(inv_dir, exclude_names=('.gitkeep',))
+			if deleted:
+				st.success(f'Eliminados {len(deleted)} archivos de inventario_actual')
+				st.write(', '.join(deleted[:50]))
+			else:
+				st.info('No se encontraron archivos a eliminar en inventario_actual.')
+
+	# Eliminación consumo_teorico
+	confirm_cons = st.checkbox('Confirmar eliminación de consumo_teorico', key='confirm_cons')
+	if st.button('Eliminar ficheros consumo_teorico', key='btn_del_cons'):
+		if not confirm_cons:
+			st.warning('Marca "Confirmar eliminación de consumo_teorico" antes de borrar.')
+		else:
+			deleted = _delete_files_in_folder(cons_dir, exclude_names=('.gitkeep',))
+			if deleted:
+				st.success(f'Eliminados {len(deleted)} archivos de consumo_teorico')
+				st.write(', '.join(deleted[:50]))
+			else:
+				st.info('No se encontraron archivos a eliminar en consumo_teorico.')
+
+	# Limpieza de caché/session
+	st.write('---')
+	confirm_cache = st.checkbox('Confirmar borrar caché y estado de sesión', key='confirm_cache')
+	if st.button('Borrar caché y session_state', key='btn_clear_cache'):
+		if not confirm_cache:
+			st.warning('Marca "Confirmar borrar caché y estado de sesión" antes de limpiar.')
+		else:
+			# Limpiar session_state
+			try:
+				st.session_state.clear()
+			except Exception:
+				pass
+			# Intentar limpiar caches de streamlit de distintas versiones
+			try:
+				st.experimental_memo.clear()
+			except Exception:
+				try:
+					st.cache_data.clear()
+				except Exception:
+					pass
+			try:
+				st.experimental_singleton.clear()
+			except Exception:
+				try:
+					st.cache_resource.clear()
+				except Exception:
+					pass
+			st.success('Caché y state limpiados (si estaban presentes).')
+
 # --- Mostrar inventario/maestro por carpeta (congelado / fresco / seco)
 # --- Conversion functions (module-level so upload handlers can call them)
 def convert_all_xls():
@@ -615,9 +700,15 @@ def render_saved_results(res):
 				mask_positive = pd.to_numeric(odf['Cantidad_a_pedir'], errors='coerce').fillna(0) > 0
 				mask_cong = odf['__COD__'].isin(cong_codes)
 				mask_fres = odf['__COD__'].isin(fres_codes)
+				# Códigos de "Bebidas latas no pedir" proporcionados por el usuario
+				bebidas_latas_codes = {"PSAL3","PSAQN","PSKLZ","PSKNZ","PSL7U","PSLTZ","PSPR3","PSPZ3"}
+				mask_bebidas_latas = odf['__COD__'].isin(bebidas_latas_codes)
+
 				congelado_tbl = odf.loc[mask_positive & mask_cong].drop(columns=['__COD__']).reset_index(drop=True)
 				fresco_tbl = odf.loc[mask_positive & mask_fres].drop(columns=['__COD__']).reset_index(drop=True)
-				seco_tbl = odf.loc[mask_positive & ~(mask_cong | mask_fres)].drop(columns=['__COD__']).reset_index(drop=True)
+				# Excluir las bebidas en lata de la tabla 'Seco' (se mostrarán en su propia tabla)
+				seco_tbl = odf.loc[mask_positive & ~(mask_cong | mask_fres | mask_bebidas_latas)].drop(columns=['__COD__']).reset_index(drop=True)
+				bebidas_latas_tbl = odf.loc[mask_positive & mask_bebidas_latas].drop(columns=['__COD__']).reset_index(drop=True)
 				# calcular 'Embalajes_a_pedir' = ceil(Cantidad_a_pedir / Unidades_por_embalaje) cuando sea posible
 				# checkbox para mostrar Unidades_por_embalaje en las tablas (oculto por defecto)
 				show_upe = st.checkbox("Mostrar 'Unidades_por_embalaje' en tablas (congelado/fresco/seco)", value=False, key='show_upe')
@@ -667,6 +758,7 @@ def render_saved_results(res):
 				congelado_tbl = _compute_embalajes(congelado_tbl)
 				fresco_tbl = _compute_embalajes(fresco_tbl)
 				seco_tbl = _compute_embalajes(seco_tbl)
+				bebidas_latas_tbl = _compute_embalajes(bebidas_latas_tbl)
 
 				# mostrar solo si tienen filas; ocultar columna Unidades_por_embalaje por defecto
 				if not congelado_tbl.empty:
@@ -677,10 +769,16 @@ def render_saved_results(res):
 					st.markdown("<h3 style='color:#CFFFD6'>Fresco</h3>", unsafe_allow_html=True)
 					display_cols = [c for c in fresco_tbl.columns if c != 'Unidades_por_embalaje' or show_upe]
 					st.dataframe(fresco_tbl[display_cols])
+				# Mostrar 'Seco' primero y luego la tabla de Bebidas Latas "No pedir" con icono de lata
 				if not seco_tbl.empty:
 					st.markdown("<h3 style='color:#FFB347'>Seco</h3>", unsafe_allow_html=True)
 					display_cols = [c for c in seco_tbl.columns if c != 'Unidades_por_embalaje' or show_upe]
 					st.dataframe(seco_tbl[display_cols])
+
+				if not bebidas_latas_tbl.empty:
+					st.markdown("<h3 style='color:#FFD2D2'>Bebidas latas 🥫 — No pedir</h3>", unsafe_allow_html=True)
+					display_cols = [c for c in bebidas_latas_tbl.columns if c != 'Unidades_por_embalaje' or show_upe]
+					st.dataframe(bebidas_latas_tbl[display_cols])
 		except Exception:
 			# no bloquear la interfaz si hay un error mostrando estas tablas
 			pass
