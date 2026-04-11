@@ -677,6 +677,10 @@ def render_saved_results(res):
 			if 'Cantidad_a_pedir' in odf.columns and 'Codigo' in odf.columns:
 				# normalizar codigo para comparar
 				odf['__COD__'] = odf['Codigo'].astype(str).str.strip().str.upper().str.replace(' ', '')
+				# Códigos excluidos permanentemente (no mostrar nunca)
+				exclude_codes = {"BSA"}
+				if not odf.empty:
+					odf = odf.loc[~odf['__COD__'].isin(exclude_codes)].reset_index(drop=True)
 				# cargar listas de códigos desde los csv de congelado/fresco (si existen)
 				cong_path = Path('congelado.csv')
 				fres_path = Path('fresco.csv')
